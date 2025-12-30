@@ -100,6 +100,11 @@
   :type 'string
   :group 'claude-code-ide)
 
+(defcustom claude-code-ide-remote-cli-path "claude-wrapper"
+  "Path to the Remote Claude Code CLI executable."
+  :type 'string
+  :group 'claude-code-ide)
+
 (defcustom claude-code-ide-buffer-name-function #'claude-code-ide--default-buffer-name
   "Function to generate buffer names for Claude Code sessions.
 The function is called with one argument, the working directory,
@@ -398,7 +403,7 @@ cursor management, and process buffering for superior user experience."
   ;; Register hook for copy-mode cursor visibility
   (add-hook 'vterm-copy-mode-hook #'claude-code-ide--vterm-copy-mode-hook nil t)
   ;; Increase process read buffering to batch more updates together
-  (when-let ((proc (get-buffer-process (current-buffer))))
+  (when-let* ((proc (get-buffer-process (current-buffer))))
     (set-process-query-on-exit-flag proc nil)
     ;; Try to make vterm read larger chunks at once
     (when (fboundp 'process-put)
@@ -501,7 +506,7 @@ This function binds:
 
 (defun claude-code-ide--session-buffer-p (buffer)
   "Check if BUFFER belongs to a Claude Code session."
-  (when-let ((name (if (stringp buffer) buffer (buffer-name buffer))))
+  (when-let* ((name (if (stringp buffer) buffer (buffer-name buffer))))
     (string-prefix-p "*claude-code[" name)))
 
 (defun claude-code-ide--terminal-reflow-filter (original-fn &rest args)
@@ -544,7 +549,7 @@ width has actually changed, working around the scrolling glitch."
 
 (defun claude-code-ide--get-working-directory ()
   "Get the current working directory (project root or current directory)."
-  (if-let ((project (project-current)))
+  (if-let* ((project (project-current)))
       (expand-file-name (project-root project))
     (expand-file-name default-directory)))
 
@@ -658,7 +663,7 @@ If `claude-code-ide-focus-on-open' is non-nil, the window is selected."
               (remhash directory claude-code-ide--session-ids)))
           ;; Kill the vterm buffer if it exists
           (let ((buffer-name (claude-code-ide--get-buffer-name directory)))
-            (when-let ((buffer (get-buffer buffer-name)))
+            (when-let* ((buffer (get-buffer buffer-name)))
               (when (buffer-live-p buffer)
                 (let ((kill-buffer-hook nil) ; Disable hooks to prevent recursion
                       (kill-buffer-query-functions nil)) ; Don't ask for confirmation
@@ -671,10 +676,11 @@ If `claude-code-ide-focus-on-open' is non-nil, the window is selected."
 
 (defun claude-code-ide--detect-cli ()
   "Detect if Claude Code CLI is available."
-  (let ((available (condition-case nil
-                       (eq (call-process claude-code-ide-cli-path nil nil nil "--version") 0)
-                     (error nil))))
-    (setq claude-code-ide--cli-available available)))
+  ;; (let ((available (condition-case nil
+  ;;                      (eq (call-process claude-code-ide-cli-path nil nil nil "--version") 0)
+  ;;                    (error nil))))
+  ;;   (setq claude-code-ide--cli-available available)))
+  (setq claude-code-ide--cli-available t))
 
 (defun claude-code-ide--ensure-cli ()
   "Ensure Claude Code CLI is available, detect if needed."
@@ -700,7 +706,7 @@ If the window is not visible, it will be shown in a side window."
       (progn
         (claude-code-ide--display-buffer-in-side-window existing-buffer)
         ;; Update the original tab when showing the window
-        (when-let ((session (claude-code-ide-mcp--get-session-for-project working-dir)))
+        (when-let* ((session (claude-code-ide-mcp--get-session-for-project working-dir)))
           (when (fboundp 'tab-bar--current-tab)
             (setf (claude-code-ide-mcp-session-original-tab session) (tab-bar--current-tab))))
         (claude-code-ide-debug "Claude Code window shown")))))
@@ -713,7 +719,10 @@ If SESSION-ID is provided, it's included in the MCP server URL path.
 If `claude-code-ide-cli-debug' is non-nil, add the -d flag.
 If `claude-code-ide-system-prompt' is non-nil, add the --append-system-prompt flag.
 Additional flags from `claude-code-ide-cli-extra-flags' are also included."
-  (let ((claude-cmd claude-code-ide-cli-path))
+  (let ((claude-cmd
+         (if (file-remote-p default-directory)
+             claude-code-ide-remote-cli-path
+         claude-code-ide-cli-path)))
     ;; Add debug flag if enabled
     (when claude-code-ide-cli-debug
       (setq claude-cmd (concat claude-cmd " -d")))
@@ -740,7 +749,7 @@ Additional flags from `claude-code-ide-cli-extra-flags' are also included."
       (setq claude-cmd (concat claude-cmd " " claude-code-ide-cli-extra-flags)))
     ;; Add MCP tools config if enabled
     (when (claude-code-ide-mcp-server-ensure-server)
-      (when-let ((config (claude-code-ide-mcp-server-get-config session-id)))
+      (when-let* ((config (claude-code-ide-mcp-server-get-config session-id)))
         (let ((json-str (json-encode config)))
           (claude-code-ide-debug "MCP tools config JSON: %s" json-str)
           ;; For vterm, we need to escape for sh -c context
@@ -798,6 +807,19 @@ and args is a list of arguments."
   (let ((parts (split-string-shell-command command-string)))
     (cons (car parts) (cdr parts))))
 
+(defun claude-code-ide-mcp-start-remote (port)
+  (claude-code-ide-debug "Starting SSH Forwarding MCP for %d" port)
+  (let* ((user (file-remote-p default-directory 'user))
+         (host (file-remote-p default-directory 'host))
+         (process (start-process "ssh-mcp-tunnel" nil "ssh" "-N" "-R"
+                                 (format "%d:localhost:%d" port port)
+                                 (format "%s@%s" user host))))
+    (set-process-sentinel process
+                          (lambda (proc event)
+                            (claude-code-ide-debug "ssh-mcp-tunnel %s: %s"
+                                                   (process-name proc)
+                                                   (string-trim event))))))
+
 
 (defun claude-code-ide--create-terminal-session (buffer-name working-dir port continue resume session-id)
   "Create a new terminal session for Claude Code.
@@ -812,8 +834,8 @@ Returns a cons cell of (buffer . process) on success.
 Signals an error if terminal fails to initialize."
   ;; Ensure terminal backend is available before proceeding
   (claude-code-ide--terminal-ensure-backend)
-  (let* ((claude-cmd (claude-code-ide--build-claude-command continue resume session-id))
-         (default-directory working-dir)
+  (let* ((default-directory working-dir)
+         (claude-cmd (claude-code-ide--build-claude-command continue resume session-id))
          (env-vars (list (format "CLAUDE_CODE_SSE_PORT=%d" port)
                          "ENABLE_IDE_INTEGRATION=true"
                          "TERM_PROGRAM=emacs"
@@ -825,14 +847,22 @@ Signals an error if terminal fails to initialize."
     (claude-code-ide-debug "Session ID: %s" session-id)
     (claude-code-ide-debug "Terminal backend: %s" claude-code-ide-terminal-backend)
 
+    (claude-code-ide-mcp-start-remote port)
     (cond
      ;; vterm backend
      ((eq claude-code-ide-terminal-backend 'vterm)
       (let* ((vterm-buffer-name buffer-name)
              ;; Set vterm-shell to run Claude directly
              (vterm-shell claude-cmd)
+             ;; (vterm-tramp-shells `((t ,claude-cmd)))
+             ;; (vterm-shell nil)
+             (vterm-tramp-shells nil)
              ;; vterm uses vterm-environment for passing env vars
              (vterm-environment (append env-vars vterm-environment)))
+
+        (if (file-remote-p working-dir)
+            (setq vterm-tramp-shells `((t ,claude-cmd))))
+
         ;; Create vterm buffer without switching to it
         (let ((buffer (save-window-excursion
                         (vterm vterm-buffer-name))))
@@ -1022,7 +1052,7 @@ conversation in the current directory."
   (interactive)
   (let* ((working-dir (claude-code-ide--get-working-directory))
          (buffer-name (claude-code-ide--get-buffer-name)))
-    (if-let ((buffer (get-buffer buffer-name)))
+    (if-let* ((buffer (get-buffer buffer-name)))
         (progn
           ;; Kill the buffer (cleanup will be handled by hooks)
           ;; The process sentinel will handle cleanup when the process dies
@@ -1039,8 +1069,8 @@ If the buffer is not visible, display it in the configured side window.
 If the buffer is already visible, switch focus to it."
   (interactive)
   (let ((buffer-name (claude-code-ide--get-buffer-name)))
-    (if-let ((buffer (get-buffer buffer-name)))
-        (if-let ((window (get-buffer-window buffer)))
+    (if-let* ((buffer (get-buffer buffer-name)))
+        (if-let* ((window (get-buffer-window buffer)))
             ;; Buffer is visible, just focus it
             (select-window window)
           ;; Buffer exists but not visible, display it
@@ -1064,7 +1094,7 @@ If the buffer is already visible, switch focus to it."
           (when choice
             (let* ((directory (alist-get choice sessions nil nil #'string=))
                    (buffer-name (funcall claude-code-ide-buffer-name-function directory)))
-              (if-let ((buffer (get-buffer buffer-name)))
+              (if-let* ((buffer (get-buffer buffer-name)))
                   (claude-code-ide--display-buffer-in-side-window buffer)
                 (user-error "Buffer for session %s no longer exists" choice)))))
       (claude-code-ide-log "No active Claude Code sessions"))))
@@ -1078,6 +1108,7 @@ If the buffer is already visible, switch focus to it."
             (client (claude-code-ide-mcp-session-client session)))
       (progn
         (claude-code-ide-mcp-send-at-mentioned)
+        (claude-code-ide-switch-to-buffer)
         (claude-code-ide-debug "Sent selection to Claude Code"))
     (user-error "Claude Code is not connected.  Please start Claude Code first")))
 
@@ -1086,7 +1117,7 @@ If the buffer is already visible, switch focus to it."
   "Send escape key to the Claude Code terminal buffer for the current project."
   (interactive)
   (let ((buffer-name (claude-code-ide--get-buffer-name)))
-    (if-let ((buffer (get-buffer buffer-name)))
+    (if-let* ((buffer (get-buffer buffer-name)))
         (with-current-buffer buffer
           (claude-code-ide--terminal-send-escape))
       (user-error "No Claude Code session for this project"))))
@@ -1097,7 +1128,7 @@ If the buffer is already visible, switch focus to it."
 This simulates typing backslash followed by Enter, which Claude Code interprets as a newline."
   (interactive)
   (let ((buffer-name (claude-code-ide--get-buffer-name)))
-    (if-let ((buffer (get-buffer buffer-name)))
+    (if-let* ((buffer (get-buffer buffer-name)))
         (with-current-buffer buffer
           (claude-code-ide--terminal-send-string "\\")
           ;; Small delay to ensure prompt text is processed before sending return
@@ -1125,7 +1156,7 @@ When called interactively, reads a prompt from the minibuffer.
 When called programmatically, sends the given PROMPT string."
   (interactive)
   (let ((buffer-name (claude-code-ide--get-buffer-name)))
-    (if-let ((buffer (get-buffer buffer-name)))
+    (if-let* ((buffer (get-buffer buffer-name)))
         (let ((prompt-to-send (or prompt (read-string "Claude prompt: "))))
           (when (not (string-empty-p prompt-to-send))
             (with-current-buffer buffer
