@@ -48,6 +48,8 @@ FILE-PATH specifies which file's buffer context to use for the search.
 This function uses the session context to operate in the correct project."
   (if (not file-path)
       (error "file_path parameter is required. Please specify the file where you want to search for %s" identifier)
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (let ((target-buffer (or (find-buffer-visiting file-path)
                                (find-file-noselect file-path)))
@@ -81,6 +83,8 @@ FILE-PATH specifies which file's buffer context to use for the search.
 This function uses the session context to operate in the correct project."
   (if (not file-path)
       (error "file_path parameter is required. Please specify the file where you want to search for pattern %s" pattern)
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (let ((target-buffer (or (find-buffer-visiting file-path)
                                (find-file-noselect file-path)))
@@ -137,6 +141,8 @@ Returns project directory, active buffer, and file count."
 Returns a list of symbols with their types and positions."
   (if (not file-path)
       (error "file_path parameter is required")
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (condition-case err
           (let ((target-buffer (or (find-buffer-visiting file-path)
@@ -216,7 +222,7 @@ MAX-DEPTH is the maximum depth to traverse."
            (child-count (treesit-node-child-count node)))
       ;; Add children
       (dotimes (i child-count)
-        (when-let ((child (treesit-node-child node i)))
+        (when-let* ((child (treesit-node-child node i)))
           (setq result (concat result
                                (claude-code-ide-mcp-treesit--format-tree
                                 child (1+ level) max-depth)))))
@@ -240,6 +246,8 @@ If INCLUDE_ANCESTORS is non-nil, include parent node hierarchy.
 If INCLUDE_CHILDREN is non-nil, include child nodes."
   (if (not file-path)
       (error "file_path parameter is required")
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (condition-case err
           (if (not (treesit-available-p))

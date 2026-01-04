@@ -179,13 +179,18 @@ Returns diagnostics in VS Code format."
 
 (defun claude-code-ide-uri-to-file-path (uri)
   "Convert a file URI to a file path."
-  (if (string-prefix-p "file://" uri)
-      (url-unhex-string (substring uri 7))
-    uri))
+  (let ((origin (if (string-prefix-p "file://" uri)
+                    (url-unhex-string (substring uri 7))
+                  uri)))
+    (if (file-remote-p default-directory)
+        (concat (file-remote-p default-directory) origin)
+      origin)))
 
 (defun claude-code-ide-file-path-to-uri (file-path)
   "Convert a FILE-PATH to a file URI."
-  (concat "file://" (url-hexify-string file-path)))
+  (if (file-remote-p file-path)
+      file-path
+    (concat "file://" (url-hexify-string file-path))))
 
 (defun claude-code-ide-diagnostics-handler (params &optional session)
   "Handle getDiagnostics tool request with PARAMS.
@@ -194,6 +199,7 @@ Optional SESSION contains the MCP session context."
          (diagnostics-by-file '())
          (project-dir (when session
                         (claude-code-ide-mcp-session-project-dir session))))
+
     (claude-code-ide-debug "Diagnostics handler called with URI: %s, project-dir: %s" uri project-dir)
     (if (and uri (not (string-empty-p uri)))
         ;; Get diagnostics for specific file
@@ -209,7 +215,7 @@ Optional SESSION contains the MCP session context."
       (let ((buffer-count 0)
             (checked-count 0))
         (dolist (buffer (buffer-list))
-          (when-let ((file (buffer-file-name buffer)))
+          (when-let* ((file (buffer-file-name buffer)))
             (setq buffer-count (1+ buffer-count))
             ;; Filter by project directory if session is available
             (when (or (not project-dir)
