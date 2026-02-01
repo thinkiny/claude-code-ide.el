@@ -216,11 +216,11 @@ Returns a list of plists with :name, :type, :description, :optional."
                 (unless required
                   (setq arg (plist-put arg :optional t)))
                 ;; Handle additional properties
-                (when-let ((enum (plist-get param :enum)))
+                (when-let* ((enum (plist-get param :enum)))
                   (setq arg (plist-put arg :enum enum)))
-                (when-let ((items (plist-get param :items)))
+                (when-let* ((items (plist-get param :items)))
                   (setq arg (plist-put arg :items items)))
-                (when-let ((properties (plist-get param :properties)))
+                (when-let* ((properties (plist-get param :properties)))
                   (setq arg (plist-put arg :properties properties)))
                 arg)))
           parameters))
@@ -273,7 +273,7 @@ Decrements the session counter and stops server if no sessions remain."
   "Get the MCP configuration for the tools server.
 If SESSION-ID is provided, includes it in the URL path.
 Returns an alist suitable for JSON encoding."
-  (when-let ((port (claude-code-ide-mcp-server-get-port)))
+  (when-let* ((port (claude-code-ide-mcp-server-get-port)))
     (let* ((path (if session-id
                      (format "/mcp/%s" session-id)
                    "/mcp"))
@@ -324,7 +324,7 @@ Returns a plist with :project-dir and :buffer, or nil if not found."
   "Update the last active buffer for SESSION-ID to BUFFER.
 This should be called when the user switches to a different buffer
 in the project to ensure MCP tools execute in the correct context."
-  (when-let ((session (gethash session-id claude-code-ide-mcp-server--sessions)))
+  (when-let* ((session (gethash session-id claude-code-ide-mcp-server--sessions)))
     (plist-put session :last-active-buffer buffer)
     (claude-code-ide-debug "Updated last active buffer for session %s to %s"
                            session-id (buffer-name buffer))))
@@ -400,6 +400,20 @@ Prefers the last active buffer over the registered buffer."
       (error
        (claude-code-ide-debug "Error stopping MCP server: %s"
                               (error-message-string err))))))
+
+;; claude-code-ide--remote-processes
+(defvar claude-code-ide--remote-processes nil
+  "List of active MCP SSH tunnel processes.")
+
+(defun claude-code-ide-associate-remote-to-buffer (buffer)
+  "Associate all processes in `claude-code-ide--remote-processes' to BUFFER.
+When BUFFER is killed, all associated processes will be terminated."
+  (dolist (proc claude-code-ide--remote-processes)
+    (when (process-live-p proc)
+      (set-process-filter proc (lambda (proc string) nil))
+      (set-process-buffer proc buffer)
+      (set-process-query-on-exit-flag proc nil)))
+  (setq claude-code-ide--remote-processes nil))
 
 (provide 'claude-code-ide-mcp-server)
 ;;; claude-code-ide-mcp-server.el ends here

@@ -77,8 +77,27 @@ Returns the session ID or nil if not found."
       (match-string 1 url))))
 
 ;;; Public Functions
+(defun claude-code-ide-mcp-http-server-start-remote (port)
+  (claude-code-ide-debug "Starting SSH Forwarding MCP HTTP for %d" port)
+  (let* ((user (file-remote-p default-directory 'user))
+         (host (file-remote-p default-directory 'host))
+         (process (start-process "ssh-mcp-http-tunnel" nil "ssh" "-N" "-R"
+                                 (format "%d:localhost:%d" port port)
+                                 (format "%s@%s" user host))))
+    (push process claude-code-ide--remote-processes)
+    (set-process-sentinel process
+                          (lambda (proc event)
+                            (claude-code-ide-debug "ssh-mcp-http-tunnel %s: %s"
+                                                   (process-name proc)
+                                                   (string-trim event))))))
 
 (defun claude-code-ide-mcp-http-server-start (&optional port)
+  (let ((result (claude-code-ide-mcp-http-server-start-local port)))
+    (if (file-remote-p default-directory)
+        (claude-code-ide-mcp-http-server-start-remote (cdr result)))
+    result))
+
+(defun claude-code-ide-mcp-http-server-start-local (&optional port)
   "Start the MCP HTTP server on PORT.
 If PORT is nil, a random available port is selected.
 Returns a cons cell of (server . port)."
