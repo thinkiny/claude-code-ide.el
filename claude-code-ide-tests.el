@@ -99,7 +99,7 @@
    ;; Define the structure accessors to avoid free variable warnings
    (defvar websocket-frame nil)
    (cl-defstruct websocket-frame opcode payload)
-   (provide (quote websocket))))
+   (provide 'websocket)))
 
 ;; === Mock vterm module ===
 (defvar vterm--process nil)
@@ -134,7 +134,7 @@
   "Mock vterm-send-key function for testing."
   nil)
 
-(provide (quote vterm))
+(provide 'vterm)
 
 ;; === Mock ghostel module ===
 (defvar ghostel-buffer-name nil)
@@ -206,7 +206,7 @@
   buffer checker filename line column end-line end-column
   message level severity id)
 
-(provide (quote flycheck))
+(provide 'flycheck)
 
 ;; === Load required modules ===
 (define-error 'mcp-error "MCP Error" 'error)

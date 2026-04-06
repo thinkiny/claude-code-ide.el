@@ -43,6 +43,7 @@
 (declare-function claude-code-ide-mcp-session-project-dir "claude-code-ide-mcp" (session))
 (declare-function claude-code-ide-mcp--setup-buffer-cache-hooks "claude-code-ide-mcp" ())
 (declare-function claude-code-ide--get-buffer-name "claude-code-ide" (&optional directory))
+(declare-function claude-code-ide-mcp--session-buffer-visible-p "claude-code-ide-mcp" (session))
 (declare-function claude-code-ide--display-buffer-in-side-window "claude-code-ide" (buffer))
 (defvar ediff-control-buffer)
 (defvar ediff-window-setup-function)
@@ -102,7 +103,7 @@ Returns the window if found, nil otherwise."
 If SESSION is provided, use it instead of looking up the current session."
   (if session
       (claude-code-ide-mcp-session-active-diffs session)
-    (if-let ((current-session (claude-code-ide-mcp--get-current-session)))
+    (if-let* ((current-session (claude-code-ide-mcp--get-current-session)))
         (claude-code-ide-mcp-session-active-diffs current-session)
       ;; No session found - return nil
       nil)))
@@ -117,8 +118,10 @@ Returns a cons cell (buffer-A . buffer-B)."
         buffer-A buffer-B)
     ;; Create or find buffer A (original file)
     (if file-exists
-        ;; File exists - use it
-        (setq buffer-A (find-file-noselect old-file-path))
+        (progn
+          (setq buffer-A (find-file-noselect old-file-path t))
+          (with-current-buffer buffer-A
+            (revert-buffer t t t)))
       ;; New file - create empty buffer
       (setq buffer-A (generate-new-buffer (format "*New file: %s*"
                                                   (file-name-nondirectory old-file-path))))
@@ -173,7 +176,7 @@ STARTUP-HOOK-FN is the hook function to remove after use."
     ;; Store the control buffer in our diff-info
     (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session))
           (control-buffer ediff-control-buffer))
-      (when-let ((diff-info (gethash tab-name active-diffs)))
+      (when-let* ((diff-info (gethash tab-name active-diffs)))
         (setf (alist-get 'control-buffer diff-info) control-buffer)
         (puthash tab-name diff-info active-diffs)))
 
@@ -329,7 +332,7 @@ ARGUMENTS should contain `path' or `tab_name' of the file to close."
         (if found-diff-info
             (progn
               ;; Check if ediff is still active and quit it using stored control buffer
-              (when-let ((control-buf (alist-get 'control-buffer found-diff-info)))
+              (when-let* ((control-buf (alist-get 'control-buffer found-diff-info)))
                 (when (buffer-live-p control-buf)
                   ;; Set a flag in diff-info to indicate this quit is from Claude
                   (setf (alist-get 'quit-from-claude found-diff-info) t)
@@ -395,6 +398,9 @@ ARGUMENTS should contain:
     (unless (and old-file-path new-file-path new-file-contents tab-name)
       (signal 'mcp-error '("Missing required parameters for openDiff")))
 
+    (if (file-remote-p default-directory)
+        (setq old-file-path (concat (file-remote-p default-directory) old-file-path)))
+
     ;; Try to find session based on the file being diffed first
     (setq session (or (claude-code-ide-mcp--find-session-for-file old-file-path)
                       ;; Fall back to current buffer's session
@@ -407,7 +413,7 @@ ARGUMENTS should contain:
     ;; Get the active diffs for this specific session
     (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
       ;; Check if there's already a diff with this tab_name
-      (when-let ((existing-diff (gethash tab-name active-diffs)))
+      (when-let* ((existing-diff (gethash tab-name active-diffs)))
         ;; Clean up existing diff
         (claude-code-ide-mcp--cleanup-diff tab-name session)))
 
@@ -427,9 +433,8 @@ ARGUMENTS should contain:
               ;; Switch to the original tab
               (tab-bar-select-tab-by-name (alist-get 'name original-tab)))))))
 
-    ;; Save current window configuration
-    (let* ((saved-winconf (current-window-configuration))
-           (buffers (claude-code-ide-mcp--create-diff-buffers
+    ;; Create diff buffers
+    (let* ((buffers (claude-code-ide-mcp--create-diff-buffers
                      old-file-path new-file-contents tab-name))
            (buffer-A (car buffers))
            (buffer-B (cdr buffers))
@@ -443,59 +448,82 @@ ARGUMENTS should contain:
                    (old-file-path . ,old-file-path)
                    (new-file-path . ,new-file-path)
                    (file-exists . ,file-exists)
-                   (saved-winconf . ,saved-winconf)
-                   (session . ,session)  ; Store the session reference
+                   (session . ,session)
                    (created-at . ,(current-time)))
                  active-diffs))
 
-      ;; Set up startup hook to configure ediff after it's fully initialized
-      (let* ((hooks (claude-code-ide-mcp--setup-diff-hooks tab-name session saved-winconf))
-             (before-setup-hook-fn (car hooks))
-             (startup-hook-fn (cdr hooks)))
+      ;; Check if the claude-code buffer is visible
+      (if (claude-code-ide-mcp--session-buffer-visible-p session)
+            ;; Buffer is visible - start ediff now
+            (claude-code-ide-mcp--start-ediff-session tab-name session buffer-A buffer-B)
+          ;; Buffer not visible - mark as pending, start when buffer becomes visible
+          (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
+            (when-let* ((diff-info (gethash tab-name active-diffs)))
+              (setf (alist-get 'pending diff-info) t)
+              (puthash tab-name diff-info active-diffs)))))
 
-        ;; Add hooks
-        (add-hook 'ediff-before-setup-hook before-setup-hook-fn)
-        (add-hook 'ediff-startup-hook startup-hook-fn)
+      ;; Return deferred indicator with session
+      `((deferred . t)
+        (unique-key . ,tab-name)
+        (session . ,session))))
 
-        ;; Start ediff
-        (condition-case err
-            (progn
-              ;; Delete all side windows before starting ediff
-              ;; This prevents "Cannot split side window" errors
-              (dolist (window (window-list))
-                (when (window-parameter window 'window-side)
-                  (delete-window window)))
+(defun claude-code-ide-mcp--start-ediff-session (tab-name session buffer-A buffer-B)
+  "Start an ediff session for TAB-NAME with SESSION comparing BUFFER-A and BUFFER-B.
+Saves window configuration, clears windows, sets up hooks, and launches ediff."
+  (let ((saved-winconf (current-window-configuration)))
+    ;; Store winconf in diff-info
+    (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
+      (when-let* ((diff-info (gethash tab-name active-diffs)))
+        (setf (alist-get 'saved-winconf diff-info) saved-winconf)
+        (puthash tab-name diff-info active-diffs)))
 
-              ;; Start ediff with plain window setup (control panel at bottom)
-              ;; Set a unique control buffer suffix to avoid conflicts with other ediff sessions
-              (let ((old-setup-fn ediff-window-setup-function)
-                    (old-split-fn ediff-split-window-function)
-                    ;; Use tab-name to create a unique suffix for this ediff session
-                    (ediff-control-buffer-suffix (format "<%s>" tab-name)))
-                (unwind-protect
-                    (progn
-                      (setq ediff-window-setup-function 'ediff-setup-windows-plain
-                            ediff-split-window-function 'split-window-horizontally)
-                      (ediff-buffers buffer-A buffer-B))
-                  ;; Restore original values
-                  (setq ediff-window-setup-function old-setup-fn
-                        ediff-split-window-function old-split-fn))))
-          (error
-           ;; Handle ediff startup errors
-           (when buffer-B
-             (kill-buffer buffer-B))
-           (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
-             (remhash tab-name active-diffs))
-           ;; Remove the hooks we added
-           (remove-hook 'ediff-before-setup-hook before-setup-hook-fn)
-           (remove-hook 'ediff-startup-hook startup-hook-fn)
-           ;; Re-signal the error
-           (signal (car err) (cdr err))))
+    ;; Set up startup hook to configure ediff after it's fully initialized
+    (let* ((hooks (claude-code-ide-mcp--setup-diff-hooks tab-name session saved-winconf))
+           (before-setup-hook-fn (car hooks))
+           (startup-hook-fn (cdr hooks)))
 
-        ;; Return deferred indicator with session
-        `((deferred . t)
-          (unique-key . ,tab-name)
-          (session . ,session))))))
+      ;; Add hooks
+      (add-hook 'ediff-before-setup-hook before-setup-hook-fn)
+      (add-hook 'ediff-startup-hook startup-hook-fn)
+
+      ;; Start ediff
+      (condition-case err
+          (progn
+            ;; Abort any active minibuffer operation
+            (when (> (minibuffer-depth) 0)
+              (abort-recursive-edit))
+            ;; Delete all windows except the current one
+            (delete-other-windows)
+            ;; Delete remaining side windows (they survive delete-other-windows)
+            (dolist (window (window-list))
+              (when (window-parameter window 'window-side)
+                (delete-window window)))
+
+            ;; Start ediff with plain window setup (control panel at bottom)
+            ;; Set a unique control buffer suffix to avoid conflicts with other ediff sessions
+            (let ((old-setup-fn ediff-window-setup-function)
+                  (old-split-fn ediff-split-window-function)
+                  ;; Use tab-name to create a unique suffix for this ediff session
+                  (ediff-control-buffer-suffix (format "<%s>" tab-name)))
+              (unwind-protect
+                  (progn
+                    (setq ediff-window-setup-function 'ediff-setup-windows-plain
+                          ediff-split-window-function 'split-window-horizontally)
+                    (ediff-buffers buffer-A buffer-B))
+                ;; Restore original values
+                (setq ediff-window-setup-function old-setup-fn
+                      ediff-split-window-function old-split-fn))))
+        (error
+         ;; Handle ediff startup errors
+         (when buffer-B
+           (kill-buffer buffer-B))
+         (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
+           (remhash tab-name active-diffs))
+         ;; Remove the hooks we added
+         (remove-hook 'ediff-before-setup-hook before-setup-hook-fn)
+         (remove-hook 'ediff-startup-hook startup-hook-fn)
+         ;; Re-signal the error
+         (signal (car err) (cdr err)))))))
 
 (defun claude-code-ide-mcp--handle-ediff-quit (tab-name &optional session)
   "Handle ediff quit for TAB-NAME.
@@ -566,7 +594,7 @@ session."
   "Clean up diff session for TAB-NAME.
 SESSION is the MCP session to use - if not provided, tries to determine it."
   (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
-    (when-let ((diff-info (gethash tab-name active-diffs)))
+    (when-let* ((diff-info (gethash tab-name active-diffs)))
       ;; If session wasn't provided, try to get it from diff-info
       (unless session
         (setq session (alist-get 'session diff-info)))
@@ -603,9 +631,10 @@ SESSION is the MCP session to use - if not provided, tries to determine it."
         (when (and buffer-B (buffer-live-p buffer-B))
           (kill-buffer buffer-B))
         ;; Kill buffer A only if it was created for a new file
-        (when (and buffer-A (buffer-live-p buffer-A) (not file-exists))
+        (when (and buffer-A (buffer-live-p buffer-A))
           ;; This is a *New file: buffer that we created
-          (kill-buffer buffer-A))
+          (if (not file-exists)
+              (kill-buffer buffer-A)))
         ;; Remove from active diffs
         (remhash tab-name active-diffs)))))
 
@@ -621,8 +650,8 @@ SESSION is the MCP session to use - if not provided, tries to determine it."
                      (setq closed-count (1+ closed-count)))
                    session-diffs))
       ;; Fallback to project directory if no current session
-      (when-let ((project-dir (claude-code-ide-mcp--get-buffer-project)))
-        (when-let ((session (claude-code-ide-mcp--get-session-for-project
+      (when-let* ((project-dir (claude-code-ide-mcp--get-buffer-project)))
+        (when-let* ((session (claude-code-ide-mcp--get-session-for-project
                              project-dir)))
           (let ((session-diffs (claude-code-ide-mcp-session-active-diffs session)))
             (maphash (lambda (tab-name _diff-info)

@@ -56,9 +56,12 @@
 
 ;; External declarations
 (defvar claude-code-ide--session-ids)
+(declare-function claude-code-ide--get-buffer-name "claude-code-ide" (&optional directory))
 (declare-function claude-code-ide-mcp--build-tool-list "claude-code-ide-mcp-handlers" ())
 (declare-function claude-code-ide-mcp--build-tool-schemas "claude-code-ide-mcp-handlers" ())
 (declare-function claude-code-ide-mcp--build-tool-descriptions "claude-code-ide-mcp-handlers" ())
+(declare-function claude-code-ide-mcp--start-ediff-session "claude-code-ide-mcp-handlers" (tab-name session buffer-A buffer-B))
+(declare-function claude-code-ide-mcp--get-active-diffs "claude-code-ide-mcp-handlers" (&optional session))
 
 ;;; Constants
 
@@ -130,7 +133,7 @@ Uses buffer-local cache to avoid repeated project lookups."
       ;; Cache is valid, return cached value (even if nil)
       claude-code-ide-mcp--buffer-project-cache
     ;; Cache is invalid or doesn't exist, recalculate
-    (let ((project-dir (when-let ((project (project-current)))
+    (let ((project-dir (when-let* ((project (project-current)))
                          (expand-file-name (project-root project)))))
       ;; Update cache
       (setq claude-code-ide-mcp--buffer-project-cache project-dir
@@ -148,7 +151,7 @@ Returns the session structure if found, nil otherwise."
 This is a convenience function that combines
 `claude-code-ide-mcp--get-buffer-project' and
 `claude-code-ide-mcp--get-session-for-project'."
-  (when-let ((project-dir (claude-code-ide-mcp--get-buffer-project)))
+  (when-let* ((project-dir (claude-code-ide-mcp--get-buffer-project)))
     (claude-code-ide-mcp--get-session-for-project project-dir)))
 
 (defun claude-code-ide-mcp--find-session-by-websocket (ws)
@@ -176,7 +179,9 @@ Returns the session if found, nil otherwise."
 
 (defun claude-code-ide-mcp--lockfile-directory ()
   "Return the directory for MCP lockfiles."
-  (expand-file-name "~/.claude/ide/"))
+  (if (file-remote-p default-directory)
+      (concat (file-remote-p default-directory) "~/.claude/ide/")
+    (expand-file-name "~/.claude/ide/")))
 
 (defun claude-code-ide-mcp--lockfile-path (port)
   "Return the lockfile path for PORT."
@@ -436,7 +441,7 @@ Optional SESSION contains the MCP session context."
         (let ((client (if session
                           (claude-code-ide-mcp-session-client session)
                         ;; Fallback: try to find session from current buffer using cache
-                        (when-let ((s (or (when (and claude-code-ide-mcp--buffer-cache-valid
+                        (when-let* ((s (or (when (and claude-code-ide-mcp--buffer-cache-valid
                                                      claude-code-ide-mcp--buffer-session-cache)
                                             claude-code-ide-mcp--buffer-session-cache)
                                           (when-let* ((project-dir (claude-code-ide-mcp--get-buffer-project))
@@ -650,13 +655,13 @@ Optional SESSION contains the MCP session context."
 
 (defun claude-code-ide-mcp--stop-ping-timer (session)
   "Stop the ping timer for SESSION."
-  (when-let ((timer (claude-code-ide-mcp-session-ping-timer session)))
+  (when-let* ((timer (claude-code-ide-mcp-session-ping-timer session)))
     (cancel-timer timer)
     (setf (claude-code-ide-mcp-session-ping-timer session) nil)))
 
 (defun claude-code-ide-mcp--send-ping (session)
   "Send a ping frame to keep connection alive for SESSION."
-  (when-let ((client (claude-code-ide-mcp-session-client session)))
+  (when-let* ((client (claude-code-ide-mcp-session-client session)))
     (condition-case err
         (websocket-send client
                         (make-websocket-frame :opcode 'ping
@@ -701,7 +706,7 @@ This should be called when the buffer's context might have changed."
       ;; Only proceed if we have a session
       (when session
         ;; Cancel any existing timer for this session
-        (when-let ((timer (claude-code-ide-mcp-session-selection-timer session)))
+        (when-let* ((timer (claude-code-ide-mcp-session-selection-timer session)))
           (cancel-timer timer))
         ;; Set new timer for this session
         (let ((project-dir (claude-code-ide-mcp-session-project-dir session))
@@ -749,7 +754,7 @@ the CLI's SelectionChangedSchema."
 
 (defun claude-code-ide-mcp--send-selection-for-project (project-dir)
   "Send current selection to Claude for PROJECT-DIR."
-  (when-let ((session (claude-code-ide-mcp--get-session-for-project project-dir)))
+  (when-let* ((session (claude-code-ide-mcp--get-session-for-project project-dir)))
     ;; Clear the timer in the session
     (setf (claude-code-ide-mcp-session-selection-timer session) nil)
 
@@ -762,10 +767,7 @@ the CLI's SelectionChangedSchema."
                                                 (expand-file-name file-path))))
           (if file-in-project
               ;; File is in project - check cursor/selection changes
-              (let* ((cursor-pos (point))
-                     (current-state (if (use-region-p)
-                                        (list cursor-pos (region-beginning) (region-end))
-                                      (list cursor-pos cursor-pos cursor-pos)))
+              (let* ((current-state (if (use-region-p) (list file-path (region-beginning) (region-end)) (list file-path)))
                      (last-state (claude-code-ide-mcp-session-last-selection session))
                      (state-changed (not (equal current-state last-state))))
                 ;; Send notification if cursor or selection changed
@@ -828,6 +830,46 @@ the CLI's SelectionChangedSchema."
               (when-let ((session-id (gethash project-dir claude-code-ide--session-ids)))
                 (claude-code-ide-mcp-server-update-last-active-buffer session-id current-buffer)))))))))
 
+
+;;; Buffer Visibility Support
+
+(defun claude-code-ide-mcp--session-buffer-visible-p (session)
+  "Return non-nil if SESSION's claude-code buffer is visible in some window."
+  (when-let* ((project-dir (claude-code-ide-mcp-session-project-dir session))
+              (claude-buffer (get-buffer (claude-code-ide--get-buffer-name project-dir))))
+    (get-buffer-window claude-buffer)))
+
+(defun claude-code-ide-mcp--maybe-start-pending-diffs (&optional _frame)
+  "Start any pending diffs for sessions whose claude-code buffer is visible.
+Intended for use on `window-buffer-change-functions'.
+Optional argument _FRAME is the frame where the change occurred (ignored)."
+  (maphash
+   (lambda (_project-dir session)
+     ;; Only proceed if the claude-code buffer exists and is visible
+     (when (claude-code-ide-mcp--session-buffer-visible-p session)
+         (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
+           (when active-diffs
+             (let ((pending-tabs '()))
+               ;; Collect pending tabs first to avoid modifying hash while iterating
+               (maphash (lambda (tab-name diff-info)
+                          (when (alist-get 'pending diff-info)
+                            (push tab-name pending-tabs)))
+                        active-diffs)
+               ;; Start each pending diff
+               (dolist (tab-name pending-tabs)
+                 (when-let* ((diff-info (gethash tab-name active-diffs)))
+                   (let ((buffer-A (alist-get 'buffer-A diff-info))
+                         (buffer-B (alist-get 'buffer-B diff-info)))
+                     ;; Remove pending flag
+                     (setf (alist-get 'pending diff-info) nil)
+                     (puthash tab-name diff-info active-diffs)
+                     ;; Start the ediff session
+                     (when (and buffer-A (buffer-live-p buffer-A)
+                                buffer-B (buffer-live-p buffer-B))
+                       (claude-code-ide-mcp--start-ediff-session
+                        tab-name session buffer-A buffer-B))))))))))
+   claude-code-ide-mcp--sessions))
+
 ;;; Public API
 
 (defun claude-code-ide-mcp-start (&optional project-directory)
@@ -869,6 +911,9 @@ the CLI's SelectionChangedSchema."
         (add-hook 'post-command-hook #'claude-code-ide-mcp--track-selection)
         (add-hook 'post-command-hook #'claude-code-ide-mcp--track-active-buffer)
 
+        ;; Set up window buffer change hook for deferred diffs
+        (add-hook 'window-buffer-change-functions #'claude-code-ide-mcp--maybe-start-pending-diffs)
+
         (claude-code-ide-debug "MCP server ready on port %d" port)
         (claude-code-ide-debug "MCP server started on port %d for %s" port
                                (file-name-nondirectory (directory-file-name project-dir)))
@@ -876,21 +921,21 @@ the CLI's SelectionChangedSchema."
 
 (defun claude-code-ide-mcp-stop-session (project-dir)
   "Stop the MCP session for PROJECT-DIR."
-  (when-let ((session (gethash project-dir claude-code-ide-mcp--sessions)))
+  (when-let* ((session (gethash project-dir claude-code-ide-mcp--sessions)))
     (claude-code-ide-debug "Stopping MCP session for %s" project-dir)
 
     ;; Close server and client
-    (when-let ((server (claude-code-ide-mcp-session-server session)))
+    (when-let* ((server (claude-code-ide-mcp-session-server session)))
       (websocket-server-close server))
 
     ;; Stop timers
-    (when-let ((ping-timer (claude-code-ide-mcp-session-ping-timer session)))
+    (when-let* ((ping-timer (claude-code-ide-mcp-session-ping-timer session)))
       (cancel-timer ping-timer))
-    (when-let ((sel-timer (claude-code-ide-mcp-session-selection-timer session)))
+    (when-let* ((sel-timer (claude-code-ide-mcp-session-selection-timer session)))
       (cancel-timer sel-timer))
 
     ;; Remove lockfile
-    (when-let ((port (claude-code-ide-mcp-session-port session)))
+    (when-let* ((port (claude-code-ide-mcp-session-port session)))
       (claude-code-ide-debug "Removing lockfile for port %d" port)
       (claude-code-ide-mcp--remove-lockfile port))
 
@@ -907,7 +952,8 @@ the CLI's SelectionChangedSchema."
     ;; Remove hooks if no more sessions
     (when (= 0 (hash-table-count claude-code-ide-mcp--sessions))
       (remove-hook 'post-command-hook #'claude-code-ide-mcp--track-selection)
-      (remove-hook 'post-command-hook #'claude-code-ide-mcp--track-active-buffer))
+      (remove-hook 'post-command-hook #'claude-code-ide-mcp--track-active-buffer)
+      (remove-hook 'window-buffer-change-functions #'claude-code-ide-mcp--maybe-start-pending-diffs))
 
     (claude-code-ide-debug "MCP server stopped for %s"
                            (file-name-nondirectory (directory-file-name project-dir)))))
@@ -939,6 +985,8 @@ Otherwise, send the current line."
          (end-line (if (use-region-p)
                        (1- (line-number-at-pos (region-end)))
                      (1- (line-number-at-pos (point))))))
+
+    (setq file-path (file-local-name file-path))
     (claude-code-ide-mcp--send-notification
      "at_mentioned"
      `((filePath . ,file-path)
