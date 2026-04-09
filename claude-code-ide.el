@@ -644,35 +644,38 @@ This function binds:
   (when-let* ((name (if (stringp buffer) buffer (buffer-name buffer))))
     (string-prefix-p "*claude-code[" name)))
 
+(defun claude-code-ide--terminal-target-width (process windows)
+  "Return target terminal width for PROCESS displayed in WINDOWS.
+The returned width follows Emacs' window sizing reducer logic."
+  (when (and (processp process) windows)
+    (car-safe (ignore-errors
+                (funcall window-adjust-process-window-size-function process windows)))))
+
 (defun claude-code-ide--terminal-reflow-filter (original-fn &rest args)
   "Filter terminal reflows to prevent height-only resize triggers.
 This wraps ORIGINAL-FN to suppress reflow signals unless the terminal
 width has actually changed, working around the scrolling glitch."
-  (let* ((base-result (apply original-fn args))
-         (dimensions-stable t))
-    ;; Examine each window showing a Claude session
-    (dolist (win (window-list))
-      (when-let* ((buf (window-buffer win))
-                  ((claude-code-ide--session-buffer-p buf)))
-        (let* ((new-width (window-width win))
-               (cached-width (window-parameter win 'claude-code-ide-cached-width)))
-          ;; Width change detected
-          (unless (eql new-width cached-width)
-            (setq dimensions-stable nil)
-            (set-window-parameter win 'claude-code-ide-cached-width new-width)))))
-    ;; Decide whether to allow reflow
-    (cond
-     ;; Not in a Claude buffer - pass through
-     ((not (claude-code-ide--session-buffer-p (current-buffer)))
-      base-result)
-     ;; In scroll mode - suppress reflow
-     ((claude-code-ide--terminal-scroll-mode-active-p)
-      nil)
-     ;; Dimensions changed - allow reflow
-     ((not dimensions-stable)
-      base-result)
-     ;; No width change - suppress reflow
-     (t nil))))
+  (let* ((process (nth 0 args))
+         (windows (nth 1 args))
+         (buffer (and (processp process) (process-buffer process))))
+    ;; Non-Claude buffers should always retain default behavior.
+    (if (not (and (buffer-live-p buffer)
+                  (claude-code-ide--session-buffer-p buffer)))
+        (apply original-fn args)
+      (with-current-buffer buffer
+        ;; In scroll/copy mode we keep suppressing reflows as before.
+        (if (claude-code-ide--terminal-scroll-mode-active-p)
+            nil
+          (let* ((new-width (claude-code-ide--terminal-target-width process windows))
+                 (cached-width (process-get process 'claude-code-ide-cached-width))
+                 (needs-reflow (or (null cached-width)
+                                   (not (eql new-width cached-width)))))
+            (if needs-reflow
+                (prog1
+                    (apply original-fn args)
+                  (process-put process 'claude-code-ide-cached-width new-width))
+              ;; Height-only change: suppress reflow completely.
+              nil)))))))
 
 
 ;;; Helper Functions
@@ -709,6 +712,9 @@ If DIRECTORY is not provided, use the current working directory."
     ;; Apply advice globally for the first session
     (advice-add resize-handler
                 :around #'claude-code-ide--terminal-reflow-filter))
+  ;; Reset cached width state for newly tracked sessions.
+  (when (processp process)
+    (process-put process 'claude-code-ide-cached-width nil))
   (puthash (or directory (claude-code-ide--get-working-directory))
            process
            claude-code-ide--processes))
@@ -860,6 +866,10 @@ This includes the main terminal process and any SSH tunnel processes."
     (setq claude-code-ide--cleanup-in-progress t)
     (unwind-protect
         (progn
+          ;; Clear cached width before tearing down the session.
+          (when-let* ((process (gethash directory claude-code-ide--processes)))
+            (when (processp process)
+              (process-put process 'claude-code-ide-cached-width nil)))
           ;; Kill all processes associated with this session first
           (claude-code-ide--kill-all-session-processes directory)
           ;; Remove from process table
