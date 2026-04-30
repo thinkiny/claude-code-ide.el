@@ -1417,6 +1417,36 @@ If the buffer is already visible, switch focus to it."
     (user-error "Claude Code is not connected.  Please start Claude Code first")))
 
 ;;;###autoload
+(defun claude-code-ide-insert-defun-at-mentioned ()
+  "Insert current defun into Claude prompt."
+  (interactive)
+  (save-excursion
+    (mark-defun)
+    ;; Trim leading blank lines
+    (let ((beg (region-beginning))
+          (end (region-end)))
+      (goto-char beg)
+      (while (and (< (point) end) (looking-at-p "^[ \t]*$"))
+        (forward-line 1))
+      (setq beg (point))
+      ;; Trim trailing blank lines
+      (goto-char end)
+      (beginning-of-line)
+      (while (and (> (point) beg) (looking-at-p "^[ \t]*$"))
+        (forward-line -1))
+      (setq end (line-beginning-position))
+      (set-mark beg)
+      (goto-char end))
+    (if-let* ((project-dir (claude-code-ide-mcp--get-buffer-project))
+              (session (claude-code-ide-mcp--get-session-for-project project-dir))
+              (client (claude-code-ide-mcp-session-client session)))
+        (progn
+          (claude-code-ide-mcp-send-at-mentioned)
+          (claude-code-ide-switch-to-buffer)
+          (claude-code-ide-debug "Sent defun to Claude Code"))
+      (user-error "Claude Code is not connected.  Please start Claude Code first"))))
+
+;;;###autoload
 (defun claude-code-ide-send-escape ()
   "Send escape key to the Claude Code terminal buffer for the current project."
   (interactive)

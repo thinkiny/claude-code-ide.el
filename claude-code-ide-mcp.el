@@ -426,7 +426,7 @@ Optional SESSION contains the MCP session context."
                id -32601 (format "Method not found: %s" method)))
              ;; Notifications (no id)
              ((string= method "ide_connected")
-              (when-let ((pid (alist-get 'pid params)))
+              (when-let* ((pid (alist-get 'pid params)))
                 (claude-code-ide-debug "CLI connected with PID: %s" pid)
                 (when session
                   (setf (claude-code-ide-mcp-session-cli-pid session) pid)))
@@ -571,7 +571,7 @@ Optional SESSION contains the MCP session context."
                                         (expand-file-name file-path)))
               (setf (claude-code-ide-mcp-session-last-buffer session) (current-buffer))
               ;; Update MCP tools server's last active buffer
-              (when-let ((session-id (gethash project-dir claude-code-ide--session-ids)))
+              (when-let* ((session-id (gethash project-dir claude-code-ide--session-ids)))
                 (claude-code-ide-mcp-server-update-last-active-buffer session-id (current-buffer)))))
           (claude-code-ide-debug "Warning: Could not find session for WebSocket connection")))))
 
@@ -827,7 +827,7 @@ the CLI's SelectionChangedSchema."
                                         (expand-file-name file-path)))
               (setf (claude-code-ide-mcp-session-last-buffer session) current-buffer)
               ;; Update MCP tools server's last active buffer
-              (when-let ((session-id (gethash project-dir claude-code-ide--session-ids)))
+              (when-let* ((session-id (gethash project-dir claude-code-ide--session-ids)))
                 (claude-code-ide-mcp-server-update-last-active-buffer session-id current-buffer)))))))))
 
 

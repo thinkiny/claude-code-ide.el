@@ -38,6 +38,7 @@
 (declare-function claude-code-ide-list-sessions "claude-code-ide" ())
 (declare-function claude-code-ide-switch-to-buffer "claude-code-ide" ())
 (declare-function claude-code-ide-insert-at-mentioned "claude-code-ide" ())
+(declare-function claude-code-ide-insert-defun-at-mentioned "claude-code-ide" ())
 (declare-function claude-code-ide-send-prompt "claude-code-ide" ())
 (declare-function claude-code-ide-send-escape "claude-code-ide" ())
 (declare-function claude-code-ide-insert-newline "claude-code-ide" ())
@@ -329,9 +330,9 @@ Otherwise, if multiple sessions exist, prompt for selection."
     ("W" "Toggle recent window" claude-code-ide-toggle-recent)]
    ["Interaction"
     ("i" "Insert selection" claude-code-ide-insert-at-mentioned)
+    ("h" "Insert mark-defun selection" claude-code-ide-insert-defun-at-mentioned)
     ("p" "Send prompt from minibuffer" claude-code-ide-send-prompt)
-    ("e" "Send escape key" claude-code-ide-send-escape)
-    ("n" "Insert newline" claude-code-ide-insert-newline)]
+    ("e" "Send escape key" claude-code-ide-send-escape)]
    ["Submenus"
     ("C" "Configuration" claude-code-ide-config-menu)
     ("d" "Debugging" claude-code-ide-debug-menu)]])
