@@ -73,8 +73,7 @@
 (defvar vterm-environment)
 (defvar eat-term-name)
 (defvar vterm--process)
-(defvar ghostel-set-title-function)
-(defvar ghostel-enable-title-tracking)
+(defvar ghostel-buffer-name-function)
 (defvar ghostel-kill-buffer-on-exit)
 (defvar evil-ghostel-mode)
 (defvar evil-ghostel--escape-mode)
@@ -516,11 +515,7 @@ cursor management, and process buffering for superior user experience."
 
 (defun claude-code-ide--disable-ghostel-title-tracking ()
   "Disable Ghostel OSC title tracking in the current buffer."
-  (cond
-   ((boundp 'ghostel-set-title-function)
-    (setq-local ghostel-set-title-function nil))
-   ((boundp 'ghostel-enable-title-tracking)
-    (setq-local ghostel-enable-title-tracking nil))))
+  (setq-local ghostel-buffer-name-function nil))
 
 (defun claude-code-ide--apply-ghostel-evil-escape ()
   "Set the buffer-local ESC routing for the current ghostel buffer.
@@ -545,7 +540,7 @@ unless `evil-ghostel-mode' is active in this buffer."
    ((eq claude-code-ide-terminal-backend 'ghostel)
     (if (fboundp 'ghostel-send-string)
         (ghostel-send-string string)
-      (when-let ((process (get-buffer-process (current-buffer))))
+      (when-let* ((process (get-buffer-process (current-buffer))))
         (process-send-string process string))))
    (t
     (error "Unknown terminal backend: %s" claude-code-ide-terminal-backend))))
@@ -713,7 +708,7 @@ If DIRECTORY is not provided, use the current working directory."
 (defun claude-code-ide--set-process (process &optional directory)
   "Set the Claude Code PROCESS for DIRECTORY or current working directory."
   ;; Check if this is the first session starting
-  (when-let ((resize-handler
+  (when-let* ((resize-handler
               (and claude-code-ide-prevent-reflow-glitch
                    (= (hash-table-count claude-code-ide--processes) 0)
                    (claude-code-ide--terminal-resize-handler))))
@@ -883,7 +878,7 @@ This includes the main terminal process and any SSH tunnel processes."
           ;; Remove from process table
           (remhash directory claude-code-ide--processes)
           ;; Check if this was the last session
-          (when-let ((resize-handler
+          (when-let* ((resize-handler
                       (and claude-code-ide-prevent-reflow-glitch
                            (= (hash-table-count claude-code-ide--processes) 0)
                            (claude-code-ide--terminal-resize-handler))))
@@ -1103,7 +1098,8 @@ Signals an error if terminal fails to initialize."
     (claude-code-ide-debug "Session ID: %s" session-id)
     (claude-code-ide-debug "Terminal backend: %s" claude-code-ide-terminal-backend)
 
-    (claude-code-ide-mcp-start-remote port)
+    (when (file-remote-p default-directory)
+      (claude-code-ide-mcp-start-remote port))
     (cond
      ;; vterm backend
      ((eq claude-code-ide-terminal-backend 'vterm)
@@ -1172,7 +1168,7 @@ Signals an error if terminal fails to initialize."
              (program (claude-code-ide--resolve-program (car cmd-parts)))
              (args (cdr cmd-parts))
              (buffer nil))
-        (when-let ((stale-buffer (get-buffer buffer-name)))
+        (when-let* ((stale-buffer (get-buffer buffer-name)))
           (kill-buffer stale-buffer))
         (setq buffer (get-buffer-create buffer-name))
         (unless (buffer-live-p buffer)
@@ -1428,7 +1424,7 @@ If the buffer is already visible, switch focus to it."
 (defun claude-code-ide-insert-defun-at-mentioned ()
   "Insert current defun into Claude prompt."
   (interactive)
-  (save-excursion
+  (save-mark-and-excursion
     (mark-defun)
     ;; Trim leading blank lines
     (let ((beg (region-beginning))

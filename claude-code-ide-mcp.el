@@ -767,7 +767,9 @@ the CLI's SelectionChangedSchema."
                                                 (expand-file-name file-path))))
           (if file-in-project
               ;; File is in project - check cursor/selection changes
-              (let* ((current-state (if (use-region-p) (list file-path (region-beginning) (region-end)) (list file-path)))
+              (let* ((current-state (if (use-region-p)
+                                        (list file-path (region-beginning) (region-end))
+                                      (list file-path (point))))
                      (last-state (claude-code-ide-mcp-session-last-selection session))
                      (state-changed (not (equal current-state last-state))))
                 ;; Send notification if cursor or selection changed

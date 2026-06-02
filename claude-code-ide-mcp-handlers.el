@@ -145,6 +145,21 @@ Returns a cons cell (buffer-A . buffer-B)."
 
     (cons buffer-A buffer-B)))
 
+(defun claude-code-ide-mcp--goto-session-terminal-end (session)
+  "Scroll SESSION's terminal buffer to the end."
+  (run-with-timer 0.5 nil
+                  (lambda (session)
+                    (when-let* ((project-dir (claude-code-ide-mcp-session-project-dir session))
+                                (buffer-name (claude-code-ide--get-buffer-name project-dir))
+                                (buffer (get-buffer buffer-name))
+                                ((buffer-live-p buffer)))
+                      (with-current-buffer buffer
+                        (if (derived-mode-p 'ghostel-mode)
+                            (dolist (win (get-buffer-window-list buffer nil t))
+                              (ghostel--anchor-window win t))
+                          (goto-char (point-max))))))
+                    session))
+
 (defun claude-code-ide-mcp--setup-diff-hooks (tab-name session saved-winconf)
   "Set up ediff hooks for TAB-NAME with SESSION and SAVED-WINCONF.
 Returns a cons cell (before-setup-hook-fn . startup-hook-fn)."
@@ -636,7 +651,8 @@ SESSION is the MCP session to use - if not provided, tries to determine it."
           (if (not file-exists)
               (kill-buffer buffer-A)))
         ;; Remove from active diffs
-        (remhash tab-name active-diffs)))))
+        (remhash tab-name active-diffs)
+        (claude-code-ide-mcp--goto-session-terminal-end session)))))
 
 (defun claude-code-ide-mcp-handle-close-all-diff-tabs (_arguments)
   "Close all diff tabs/buffers for the current session only."
