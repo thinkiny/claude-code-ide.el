@@ -666,15 +666,23 @@ width has actually changed, working around the scrolling glitch."
         ;; In scroll/copy mode we keep suppressing reflows as before.
         (if (claude-code-ide--terminal-scroll-mode-active-p)
             nil
-          (let* ((new-width (claude-code-ide--terminal-target-width process windows))
+          ;; Use frame-correct windows: the passed-in windows list comes
+          ;; from the selected frame, but the process may be displayed in
+          ;; a different frame.  Derive the correct windows from the
+          ;; process's own buffer across all frames.
+          (let* ((frame-correct-windows
+                  (get-buffer-window-list buffer nil t))
+                 (new-width (and frame-correct-windows
+                                 (claude-code-ide--terminal-target-width
+                                  process frame-correct-windows)))
                  (cached-width (process-get process 'claude-code-ide-cached-width))
-                 (needs-reflow (or (null cached-width)
-                                   (not (eql new-width cached-width)))))
+                 (needs-reflow (and frame-correct-windows
+                                    (or (null cached-width)
+                                        (not (eql new-width cached-width))))))
             (if needs-reflow
                 (prog1
-                    (apply original-fn args)
+                    (apply original-fn (list process frame-correct-windows))
                   (process-put process 'claude-code-ide-cached-width new-width))
-              ;; Height-only change: suppress reflow completely.
               nil)))))))
 
 

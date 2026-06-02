@@ -1040,7 +1040,7 @@ with an explanatory error rather than operating on the dead buffer."
                                  (funcall claude-code-ide-buffer-name-function dir))
                                (list dir1 dir2))))
           (dolist (buffer-name buffers)
-            (when-let ((buffer (get-buffer buffer-name)))
+            (when-let* ((buffer (get-buffer buffer-name)))
               (claude-code-ide-tests--wait-for-process buffer)
               (kill-buffer buffer))))
         (delete-directory dir1 t)
@@ -1078,6 +1078,7 @@ with an explanatory error rather than operating on the dead buffer."
   "Test building command with append-system-prompt flag."
   ;; Test with user system prompt
   (let ((claude-code-ide-cli-path "claude")
+        (claude-code-ide-emacs-prompt "Connected to Emacs")
         (claude-code-ide-system-prompt "You are a helpful assistant")
         (claude-code-ide-cli-debug nil)
         (claude-code-ide-cli-extra-flags ""))
@@ -1091,6 +1092,7 @@ with an explanatory error rather than operating on the dead buffer."
                   (string-match-p "You\\\\ are\\\\ a\\\\ helpful\\\\ assistant" cmd)))))
   ;; Test with nil value (should still add the Emacs prompt)
   (let ((claude-code-ide-cli-path "claude")
+        (claude-code-ide-emacs-prompt "Connected to Emacs")
         (claude-code-ide-system-prompt nil)
         (claude-code-ide-cli-debug nil)
         (claude-code-ide-cli-extra-flags ""))
@@ -1103,6 +1105,7 @@ with an explanatory error rather than operating on the dead buffer."
       (should-not (string-match-p "You are a helpful assistant" cmd))))
   ;; Test with special characters that need quoting
   (let ((claude-code-ide-cli-path "claude")
+        (claude-code-ide-emacs-prompt "Connected to Emacs")
         (claude-code-ide-system-prompt "You're a \"helpful\" assistant!")
         (claude-code-ide-cli-debug nil)
         (claude-code-ide-cli-extra-flags ""))
@@ -1802,7 +1805,9 @@ with an explanatory error rather than operating on the dead buffer."
                      (let ((suffix (or ediff-control-buffer-suffix "")))
                        (push (format "*Ediff Control Panel%s*" suffix) control-buffers))))
                   ((symbol-function 'claude-code-ide-mcp--get-current-session)
-                   (lambda () session)))
+                   (lambda () session))
+                  ((symbol-function 'claude-code-ide-mcp--session-buffer-visible-p)
+                   (lambda (_) t)))
 
          ;; Simulate opening multiple diffs
          (unwind-protect
