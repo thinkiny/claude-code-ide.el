@@ -114,6 +114,21 @@ Returns a cons cell (buffer-A . buffer-B)."
 
     (cons buffer-A buffer-B)))
 
+(defun claude-code-ide-mcp--goto-session-terminal-end (session)
+  "Scroll SESSION's terminal buffer to the end."
+  (run-with-timer 0.5 nil
+                  (lambda (session)
+                    (when-let* ((project-dir (claude-code-ide-mcp-session-project-dir session))
+                                (buffer-name (claude-code-ide--get-buffer-name project-dir))
+                                (buffer (get-buffer buffer-name))
+                                ((buffer-live-p buffer)))
+                      (with-current-buffer buffer
+                        (if (derived-mode-p 'ghostel-mode)
+                            (dolist (win (get-buffer-window-list buffer nil t))
+                              (ghostel--anchor-window win t))
+                          (goto-char (point-max))))))
+                    session))
+
 (defun claude-code-ide-mcp--setup-diff-hooks (tab-name session saved-winconf)
   "Set up ediff hooks for TAB-NAME with SESSION and SAVED-WINCONF.
 Returns a cons cell (before-setup-hook-fn . startup-hook-fn)."
@@ -395,8 +410,9 @@ ARGUMENTS should contain:
               ;; Switch to the original tab
               (tab-bar-select-tab-by-name (alist-get 'name original-tab)))))))
 
-    ;; Create diff buffers
-    (let* ((buffers (claude-code-ide-mcp--create-diff-buffers
+    ;; Save current window configuration
+    (let* ((saved-winconf (current-window-configuration))
+           (buffers (claude-code-ide-mcp--create-diff-buffers
                      old-file-path new-file-contents tab-name))
            (buffer-A (car buffers))
            (buffer-B (cdr buffers))
@@ -410,64 +426,83 @@ ARGUMENTS should contain:
                    (old-file-path . ,old-file-path)
                    (new-file-path . ,new-file-path)
                    (file-exists . ,file-exists)
-                   (session . ,session)
+                   (saved-winconf . ,saved-winconf)
+                   (session . ,session)  ; Store the session reference
                    (created-at . ,(current-time)))
                  active-diffs))
 
-      ;; Check if the claude-code buffer is visible
+      ;; Only start ediff while the instance's terminal is visible in the
+      ;; selected frame.  Under per-perspective/per-tab window layouts a
+      ;; hidden instance must not seize the current layout; defer instead
+      ;; and let `claude-code-ide-mcp--maybe-start-pending-diffs' launch it
+      ;; when the buffer becomes visible again.
       (if (claude-code-ide-mcp--session-buffer-visible-p session)
-          ;; Buffer is visible - start ediff now
           (claude-code-ide-mcp--start-ediff-session tab-name session buffer-A buffer-B)
-        ;; Buffer not visible - mark as pending, start when buffer becomes visible
         (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
           (when-let* ((diff-info (gethash tab-name active-diffs)))
             (setf (alist-get 'pending diff-info) t)
-            (puthash tab-name diff-info active-diffs)))))
+            (puthash tab-name diff-info active-diffs))))
 
-    ;; Return deferred indicator with session
-    `((deferred . t)
-      (unique-key . ,tab-name)
-      (session . ,session))))
+      ;; Return deferred indicator; the dispatcher correlates the
+      ;; response id with the requesting session itself
+      `((deferred . t)
+        (unique-key . ,tab-name)))))
 
 (defun claude-code-ide-mcp--start-ediff-session (tab-name session buffer-A buffer-B)
   "Start an ediff session for TAB-NAME with SESSION comparing BUFFER-A and BUFFER-B.
-Saves window configuration, clears windows, sets up hooks, and launches ediff."
-  (let ((saved-winconf (current-window-configuration)))
-    ;; Store winconf in diff-info
-    (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
-      (when-let* ((diff-info (gethash tab-name active-diffs)))
-        (setf (alist-get 'saved-winconf diff-info) saved-winconf)
-        (puthash tab-name diff-info active-diffs)))
+Clears side windows, sets up hooks, and launches ediff.  SESSION's stored
+`saved-winconf' is restored by the ediff quit hook."
+  (let* ((active-diffs (claude-code-ide-mcp--get-active-diffs session))
+         (diff-info (gethash tab-name active-diffs))
+         (saved-winconf (alist-get 'saved-winconf diff-info))
+         (hooks (claude-code-ide-mcp--setup-diff-hooks tab-name session saved-winconf))
+         (before-setup-hook-fn (car hooks))
+         (startup-hook-fn (cdr hooks)))
 
-    ;; Start ediff with plain window setup (control panel at bottom).
-    ;; Concurrent ediffs are distinguished by buffer identity in the
-    ;; startup hook; ediff itself uniquifies control buffer names.
-    (let ((old-setup-fn ediff-window-setup-function)
-          (old-split-fn ediff-split-window-function))
-      (unwind-protect
-          (progn
-            (setq ediff-window-setup-function 'ediff-setup-windows-plain
-                  ediff-split-window-function 'split-window-horizontally)
-            (ediff-buffers buffer-A buffer-B))
-        ;; Restore original values
-        (setq ediff-window-setup-function old-setup-fn
-              ediff-split-window-function old-split-fn))))
-  (error
-   ;; Handle ediff startup errors
-   (when buffer-B
-     (kill-buffer buffer-B))
-   (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
-     (remhash tab-name active-diffs))
-   ;; Remove the hooks we added
-   (remove-hook 'ediff-before-setup-hook before-setup-hook-fn)
-   (remove-hook 'ediff-startup-hook startup-hook-fn)
-   ;; Re-signal the error
-   (signal (car err) (cdr err))))
 
-;; Return deferred indicator; the dispatcher correlates the
-;; response id with the requesting session itself
-`((deferred . t)
-  (unique-key . ,tab-name))))))
+    ;; Add hooks
+    (add-hook 'ediff-before-setup-hook before-setup-hook-fn)
+    (add-hook 'ediff-startup-hook startup-hook-fn)
+
+    ;; Start ediff
+    (condition-case err
+        (progn
+          ;; Delete all side windows before starting ediff
+          ;; This prevents "Cannot split side window" errors
+          (dolist (window (window-list))
+            (when (window-parameter window 'window-side)
+              (delete-window window)))
+
+          ;; Start ediff with plain window setup (control panel at bottom).
+          ;; Concurrent ediffs are distinguished by buffer identity in the
+          ;; startup hook; ediff itself uniquifies control buffer names.
+          (let ((old-setup-fn ediff-window-setup-function)
+                (old-split-fn ediff-split-window-function))
+            (unwind-protect
+                (progn
+                  (setq ediff-window-setup-function 'ediff-setup-windows-plain
+                        ediff-split-window-function 'split-window-horizontally)
+                  (ediff-buffers buffer-A buffer-B))
+              ;; Restore original values
+              (setq ediff-window-setup-function old-setup-fn
+                    ediff-split-window-function old-split-fn))))
+      (error
+       ;; Handle ediff startup errors
+       (when buffer-B
+         (kill-buffer buffer-B))
+       (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
+         (remhash tab-name active-diffs))
+       ;; Remove the hooks we added
+       (remove-hook 'ediff-before-setup-hook before-setup-hook-fn)
+       (remove-hook 'ediff-startup-hook startup-hook-fn)
+       ;; Re-signal the error
+       (signal (car err) (cdr err))))
+
+    ;; Return deferred indicator; the dispatcher correlates the
+    ;; response id with the requesting session itself
+    `((deferred . t)
+      (unique-key . ,tab-name))))
+
 
 (defun claude-code-ide-mcp--handle-ediff-quit (tab-name session)
   "Handle ediff quit for TAB-NAME in SESSION.
@@ -572,7 +607,8 @@ lexically, and diff-info's stored session serves as a backstop."
           (if (not file-exists)
               (kill-buffer buffer-A)))
         ;; Remove from active diffs
-        (remhash tab-name active-diffs)))))
+        (remhash tab-name active-diffs)
+        (claude-code-ide-mcp--goto-session-terminal-end session)))))
 
 (defun claude-code-ide-mcp-handle-close-all-diff-tabs (_arguments &optional session)
   "Close all diff tabs/buffers belonging to SESSION only."
