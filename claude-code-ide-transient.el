@@ -336,9 +336,9 @@
     ("a" "Show all instances" claude-code-ide-show-all)]
    ["Interaction"
     ("i" "Insert selection" claude-code-ide-insert-at-mentioned)
+    ("h" "Insert mark-defun selection" claude-code-ide-insert-defun-at-mentioned)
     ("p" "Send prompt from minibuffer" claude-code-ide-send-prompt)
-    ("e" "Send escape key" claude-code-ide-send-escape)
-    ("n" "Insert newline" claude-code-ide-insert-newline)]
+    ("e" "Send escape key" claude-code-ide-send-escape)]
    ["Submenus"
     ("C" "Configuration" claude-code-ide-config-menu)
     ("d" "Debugging" claude-code-ide-debug-menu)]])
