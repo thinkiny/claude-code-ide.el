@@ -1310,6 +1310,7 @@ next toggle, independent of which project the instances belong to."
   "Test building command with append-system-prompt flag."
   ;; Test with user system prompt
   (let ((claude-code-ide-cli-path "claude")
+        (claude-code-ide-emacs-prompt "Connected to Emacs")
         (claude-code-ide-system-prompt "You are a helpful assistant")
         (claude-code-ide-cli-debug nil)
         (claude-code-ide-cli-extra-flags ""))
@@ -1323,6 +1324,7 @@ next toggle, independent of which project the instances belong to."
                   (string-match-p "You\\\\ are\\\\ a\\\\ helpful\\\\ assistant" cmd)))))
   ;; Test with nil value (should still add the Emacs prompt)
   (let ((claude-code-ide-cli-path "claude")
+        (claude-code-ide-emacs-prompt "Connected to Emacs")
         (claude-code-ide-system-prompt nil)
         (claude-code-ide-cli-debug nil)
         (claude-code-ide-cli-extra-flags ""))
@@ -1335,6 +1337,7 @@ next toggle, independent of which project the instances belong to."
       (should-not (string-match-p "You are a helpful assistant" cmd))))
   ;; Test with special characters that need quoting
   (let ((claude-code-ide-cli-path "claude")
+        (claude-code-ide-emacs-prompt "Connected to Emacs")
         (claude-code-ide-system-prompt "You're a \"helpful\" assistant!")
         (claude-code-ide-cli-debug nil)
         (claude-code-ide-cli-extra-flags ""))
@@ -2107,7 +2110,9 @@ control buffer name plays no role (ediff derives
                      (cl-incf ediff-called-count)
                      (push (buffer-name buf-B) control-buffers)))
                   ((symbol-function 'claude-code-ide-mcp--get-current-session)
-                   (lambda () session)))
+                   (lambda () session))
+                  ((symbol-function 'claude-code-ide-mcp--session-buffer-visible-p)
+                   (lambda (_) t)))
 
          ;; Simulate opening multiple diffs
          (unwind-protect
