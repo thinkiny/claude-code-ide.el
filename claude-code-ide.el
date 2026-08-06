@@ -74,8 +74,7 @@
 (defvar eat-term-name)
 (defvar vterm--process)
 (defvar vterm-copy-mode)
-(defvar ghostel-set-title-function)
-(defvar ghostel-enable-title-tracking)
+(defvar ghostel-buffer-name-function)
 (defvar ghostel-kill-buffer-on-exit)
 (defvar evil-ghostel-mode)
 (defvar evil-ghostel--escape-mode)
@@ -531,11 +530,7 @@ cursor management, and process buffering for superior user experience."
 
 (defun claude-code-ide--disable-ghostel-title-tracking ()
   "Disable Ghostel OSC title tracking in the current buffer."
-  (cond
-   ((boundp 'ghostel-set-title-function)
-    (setq-local ghostel-set-title-function nil))
-   ((boundp 'ghostel-enable-title-tracking)
-    (setq-local ghostel-enable-title-tracking nil))))
+  (setq-local ghostel-buffer-name-function nil))
 
 (defun claude-code-ide--apply-ghostel-evil-escape ()
   "Set the buffer-local ESC routing for the current ghostel buffer.
@@ -938,8 +933,8 @@ most recently used one — only displaying or hiding windows would."
       (add-hook 'tab-bar-tab-post-open-functions
                 #'claude-code-ide--strip-new-tab-claude-windows))
     (when-let* ((resize-handler
-                 (and claude-code-ide-prevent-reflow-glitch
-                      (claude-code-ide--terminal-resize-handler))))
+                (and claude-code-ide-prevent-reflow-glitch
+                     (claude-code-ide--terminal-resize-handler))))
       (advice-add resize-handler
                   :around #'claude-code-ide--terminal-reflow-filter))))
 
@@ -1724,7 +1719,7 @@ instance, else the most recently used one (prefix argument picks)."
 (defun claude-code-ide-insert-defun-at-mentioned ()
   "Insert current defun into Claude prompt."
   (interactive)
-  (save-excursion
+  (save-mark-and-excursion
     (mark-defun)
     ;; Trim leading blank lines
     (let ((beg (region-beginning))
@@ -1860,7 +1855,7 @@ apply to the current tab only."
       (user-error "No Claude Code session for this project"))
     (if pick
         (when-let* ((session (claude-code-ide--read-project-session
-                              "Toggle Claude instance: " project-dir)))
+                             "Toggle Claude instance: " project-dir)))
           (claude-code-ide--toggle-existing-window session))
       (let ((visible (claude-code-ide--visible-project-sessions project-dir)))
         (if visible
