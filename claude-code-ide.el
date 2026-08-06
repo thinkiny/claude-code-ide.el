@@ -106,8 +106,13 @@
   :group 'tools
   :prefix "claude-code-ide-")
 
-(defcustom claude-code-ide-cli-path "claude"
+(defcustom claude-code-ide-cli-path "claude-local"
   "Path to the Claude Code CLI executable."
+  :type 'string
+  :group 'claude-code-ide)
+
+(defcustom claude-code-ide-remote-cli-path "claude-remote"
+  "Path to the Remote Claude Code CLI executable."
   :type 'string
   :group 'claude-code-ide)
 
@@ -130,6 +135,14 @@ spliced into (or appended to) their result."
 (defcustom claude-code-ide-cli-extra-flags ""
   "Additional flags to pass to the Claude Code CLI.
 This should be a string of space-separated flags, e.g. \"--model opus\"."
+  :type 'string
+  :group 'claude-code-ide)
+
+(defcustom claude-code-ide-emacs-prompt ""
+  "Emacs-specific prompt prepended to Claude's system prompt.
+This prompt provides Claude with essential information about Emacs
+coordinate systems and available features.  This prompt is always
+included before any custom system prompt."
   :type 'string
   :group 'claude-code-ide)
 
@@ -485,7 +498,7 @@ cursor management, and process buffering for superior user experience."
     (set-process-query-on-exit-flag proc nil)
     ;; Try to make vterm read larger chunks at once
     (when (fboundp 'process-put)
-      (process-put proc 'read-output-max 4096)))
+      (process-put proc 'read-output-max (* 4 1024 1024))))
   ;; Set up rendering optimization
   (when claude-code-ide-vterm-anti-flicker
     (advice-add 'vterm--filter :around #'claude-code-ide--vterm-smart-renderer)))
@@ -1124,7 +1137,10 @@ If `claude-code-ide-cli-debug' is non-nil, add the -d flag.
 If `claude-code-ide-system-prompt' is non-nil, add the
 --append-system-prompt flag.
 Additional flags from `claude-code-ide-cli-extra-flags' are also included."
-  (let ((claude-cmd claude-code-ide-cli-path))
+  (let ((claude-cmd
+         (if (file-remote-p default-directory)
+             claude-code-ide-remote-cli-path
+           claude-code-ide-cli-path)))
     ;; Add debug flag if enabled
     (when claude-code-ide-cli-debug
       (setq claude-cmd (concat claude-cmd " -d")))
@@ -1135,10 +1151,7 @@ Additional flags from `claude-code-ide-cli-extra-flags' are also included."
     (when continue
       (setq claude-cmd (concat claude-cmd " -c")))
     ;; Add append-system-prompt flag with Emacs context
-    (let ((emacs-prompt "IMPORTANT: Connected to Emacs via claude-code-ide.el integration. Emacs uses mixed coordinates: Lines: 1-based (line 1 = first line), Columns: 0-based (column 0 = first column). Example: First character in file is at line 1, column 0. Available: xref (LSP), tree-sitter, imenu, project.el, flycheck/flymake diagnostics. Context-aware with automatic project/file/selection tracking.")
-          (combined-prompt nil))
-      ;; Always include the Emacs-specific prompt
-      (setq combined-prompt emacs-prompt)
+    (let ((combined-prompt claude-code-ide-emacs-prompt))
       ;; Append user's custom prompt if set
       (when claude-code-ide-system-prompt
         (setq combined-prompt (concat combined-prompt "\n\n" claude-code-ide-system-prompt)))
@@ -1224,6 +1237,20 @@ absolute path sidesteps that lookup."
           (expand-file-name program)
         (executable-find program))
       program))
+
+(defun claude-code-ide-mcp-start-remote (port)
+  (claude-code-ide-debug "Starting SSH Forwarding MCP for %d" port)
+  (let* ((user (file-remote-p default-directory 'user))
+         (host (file-remote-p default-directory 'host))
+         (process (start-process "ssh-mcp-tunnel" nil "ssh" "-N" "-R"
+                                 (format "%d:localhost:%d" port port)
+                                 (format "%s@%s" user host))))
+    (push process claude-code-ide--remote-processes)
+    (set-process-sentinel process
+                          (lambda (proc event)
+                            (claude-code-ide-debug "ssh-mcp-tunnel %s: %s"
+                                                   (process-name proc)
+                                                   (string-trim event))))))
 
 
 (defun claude-code-ide--create-terminal-session (buffer-name working-dir port continue resume session-id)

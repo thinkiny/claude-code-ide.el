@@ -42,12 +42,75 @@
 
 ;;; Tool Functions
 
+(defun claude-code-ide-mcp--format-xref-items (xref-items)
+  "Format XREF-ITEMS as a list of alists with text and location."
+  (mapcar (lambda (item)
+            (let* ((summary  (xref-item-summary item))
+                   (location (xref-item-location item))
+                   (file     (xref-location-group location))
+                   (line     (or (xref-location-line location)
+                                 (let ((marker (xref-location-marker location)))
+                                   (with-current-buffer (marker-buffer marker)
+                                     (save-excursion
+                                       (goto-char marker)
+                                       (line-number-at-pos))))))
+                   (col      (or (ignore-errors (xref-file-location-column location)) 0))
+                   (uri      (concat "file://" (expand-file-name file))))
+              `((text . ,summary)
+                (location . ((uri . ,uri)
+                             (line . ,line)
+                             (col . ,col))))))
+          xref-items))
+
+(defun claude-code-ide-mcp--find-identifier-in-project (identifier)
+  "Find IDENTIFIER in the project using ripgrep.
+Returns (file-path . line-number) of the first match, or nil."
+  (let* ((project-dir (or (when-let* ((proj (project-current)))
+                            (project-root proj))
+                          default-directory))
+         (output (with-temp-buffer
+                   (call-process "rg" nil t nil
+                                 "--no-heading" "--line-number" "--max-count" "1"
+                                 "-w" identifier project-dir)
+                   (buffer-string))))
+    (when (and output (string-match "^\\(.+?\\):\\([0-9]+\\):" output))
+      (cons (match-string 1 output)
+            (string-to-number (match-string 2 output))))))
+
+(defun claude-code-ide-mcp--maybe-remote-file-path (file-path)
+  "Return FILE-PATH prefixed with remote context when needed."
+  (let ((remote-prefix (file-remote-p default-directory)))
+    (if (and remote-prefix (not (file-remote-p file-path)))
+        (concat remote-prefix file-path)
+      file-path)))
+
+(defun claude-code-ide-mcp--position-point-for-identifier (identifier)
+  "Best-effort move point to IDENTIFIER in current buffer or project fallback.
+Returns non-nil when IDENTIFIER is found and point is positioned."
+  (let ((pattern (concat "\\_<" (regexp-quote identifier) "\\_>")))
+    (goto-char (point-min))
+    (if (re-search-forward pattern nil t)
+        (progn
+          (goto-char (match-beginning 0))
+          t)
+      (when-let* ((result (claude-code-ide-mcp--find-identifier-in-project identifier))
+                  (found-file (car result))
+                  (found-line (cdr result))
+                  (found-buffer (find-file-noselect found-file)))
+        (set-buffer found-buffer)
+        (goto-char (point-min))
+        (forward-line (1- found-line))
+        (when (re-search-forward pattern (line-end-position) t)
+          (goto-char (match-beginning 0))
+          t)))))
+
 (defun claude-code-ide-mcp-xref-find-references (identifier file-path)
   "Find references to IDENTIFIER in the current session's project.
 FILE-PATH specifies which file's buffer context to use for the search.
 This function uses the session context to operate in the correct project."
   (if (not file-path)
       (error "file_path parameter is required. Please specify the file where you want to search for %s" identifier)
+    (setq file-path (claude-code-ide-mcp--maybe-remote-file-path file-path))
     (claude-code-ide-mcp-server-with-session-context nil
       (let ((target-buffer (or (find-buffer-visiting file-path)
                                (find-file-noselect file-path)))
@@ -57,20 +120,14 @@ This function uses the session context to operate in the correct project."
               (let ((backend (xref-find-backend)))
                 (if (not backend)
                     (format "No xref backend available for %s" file-path)
-                  (let ((xref-items (xref-backend-references backend identifier-str)))
-                    (if xref-items
-                        (mapcar (lambda (item)
-                                  (let* ((location (xref-item-location item))
-                                         (file (xref-location-group location))
-                                         (marker (xref-location-marker location))
-                                         (line (with-current-buffer (marker-buffer marker)
-                                                 (save-excursion
-                                                   (goto-char marker)
-                                                   (line-number-at-pos))))
-                                         (summary (xref-item-summary item)))
-                                    (format "%s:%d: %s" file line summary)))
-                                xref-items)
-                      (format "No references found for '%s'" identifier-str)))))
+                  (save-excursion
+                    ;; Position point so LSP-based backends use the right cursor.
+                    (let* ((positioned (claude-code-ide-mcp--position-point-for-identifier identifier-str))
+                           (xref-items (and positioned
+                                            (xref-backend-references backend identifier-str))))
+                      (if xref-items
+                          (claude-code-ide-mcp--format-xref-items xref-items)
+                        (format "No references found for '%s'" identifier-str))))))
             (error
              (format "Error searching for '%s' in %s: %s"
                      identifier-str file-path (error-message-string err)))))))))
@@ -81,6 +138,8 @@ FILE-PATH specifies which file's buffer context to use for the search.
 This function uses the session context to operate in the correct project."
   (if (not file-path)
       (error "file_path parameter is required. Please specify the file where you want to search for pattern %s" pattern)
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (let ((target-buffer (or (find-buffer-visiting file-path)
                                (find-file-noselect file-path)))
@@ -101,17 +160,7 @@ This function uses the session context to operate in the correct project."
                  (t
                   (let ((xref-items (xref-backend-apropos backend pattern-str)))
                     (if xref-items
-                        (mapcar (lambda (item)
-                                  (let* ((location (xref-item-location item))
-                                         (file (xref-location-group location))
-                                         (marker (xref-location-marker location))
-                                         (line (with-current-buffer (marker-buffer marker)
-                                                 (save-excursion
-                                                   (goto-char marker)
-                                                   (line-number-at-pos))))
-                                         (summary (xref-item-summary item)))
-                                    (format "%s:%d: %s" file line summary)))
-                                xref-items)
+                        (claude-code-ide-mcp--format-xref-items xref-items)
                       (format "No symbols found matching pattern '%s'" pattern-str))))))
             (error
              (format "Error searching for pattern '%s' in %s: %s"
@@ -137,11 +186,18 @@ Returns project directory, active buffer, and file count."
 Returns a list of symbols with their types and positions."
   (if (not file-path)
       (error "file_path parameter is required")
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (condition-case err
-          (let ((target-buffer (or (find-buffer-visiting file-path)
-                                   (find-file-noselect file-path))))
+          (let* ((existing-buffer (find-buffer-visiting file-path))
+                 (target-buffer (or existing-buffer
+                                    (find-file-noselect file-path))))
             (with-current-buffer target-buffer
+              ;; Ensure font-lock/treesit is initialized for newly opened buffers
+              (unless existing-buffer
+                (font-lock-ensure)
+                (setq imenu--index-alist nil))
               ;; Generate or update imenu index
               (imenu--make-index-alist)
               (if imenu--index-alist
@@ -240,6 +296,8 @@ If INCLUDE_ANCESTORS is non-nil, include parent node hierarchy.
 If INCLUDE_CHILDREN is non-nil, include child nodes."
   (if (not file-path)
       (error "file_path parameter is required")
+    (if (file-remote-p default-directory)
+        (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (condition-case err
           (if (not (treesit-available-p))

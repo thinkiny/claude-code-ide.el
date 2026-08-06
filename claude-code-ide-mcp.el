@@ -59,6 +59,8 @@
 (declare-function claude-code-ide-mcp--build-tool-list "claude-code-ide-mcp-handlers" ())
 (declare-function claude-code-ide-mcp--build-tool-schemas "claude-code-ide-mcp-handlers" ())
 (declare-function claude-code-ide-mcp--build-tool-descriptions "claude-code-ide-mcp-handlers" ())
+(declare-function claude-code-ide-mcp--start-ediff-session "claude-code-ide-mcp-handlers" (tab-name session buffer-A buffer-B))
+(declare-function claude-code-ide-mcp--get-active-diffs "claude-code-ide-mcp-handlers" (&optional session))
 
 ;;; Constants
 
@@ -207,7 +209,9 @@ used session."
 
 (defun claude-code-ide-mcp--lockfile-directory ()
   "Return the directory for MCP lockfiles."
-  (expand-file-name "~/.claude/ide/"))
+  (if (file-remote-p default-directory)
+      (concat (file-remote-p default-directory) "~/.claude/ide/")
+    (expand-file-name "~/.claude/ide/")))
 
 (defun claude-code-ide-mcp--lockfile-path (port)
   "Return the lockfile path for PORT."
@@ -820,6 +824,46 @@ deduplicated."
                (claude-code-ide-mcp-session-session-id session)
                current-buffer))))))))
 
+
+;;; Buffer Visibility Support
+
+(defun claude-code-ide-mcp--session-buffer-visible-p (session)
+  "Return non-nil if SESSION's claude-code buffer is visible in some window."
+  (when-let* ((project-dir (claude-code-ide-mcp-session-project-dir session))
+              (claude-buffer (get-buffer (claude-code-ide--get-buffer-name project-dir))))
+    (get-buffer-window claude-buffer)))
+
+(defun claude-code-ide-mcp--maybe-start-pending-diffs (&optional _frame)
+  "Start any pending diffs for sessions whose claude-code buffer is visible.
+Intended for use on `window-buffer-change-functions'.
+Optional argument _FRAME is the frame where the change occurred (ignored)."
+  (maphash
+   (lambda (_project-dir session)
+     ;; Only proceed if the claude-code buffer exists and is visible
+     (when (claude-code-ide-mcp--session-buffer-visible-p session)
+       (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
+         (when active-diffs
+           (let ((pending-tabs '()))
+             ;; Collect pending tabs first to avoid modifying hash while iterating
+             (maphash (lambda (tab-name diff-info)
+                        (when (alist-get 'pending diff-info)
+                          (push tab-name pending-tabs)))
+                      active-diffs)
+             ;; Start each pending diff
+             (dolist (tab-name pending-tabs)
+               (when-let* ((diff-info (gethash tab-name active-diffs)))
+                 (let ((buffer-A (alist-get 'buffer-A diff-info))
+                       (buffer-B (alist-get 'buffer-B diff-info)))
+                   ;; Remove pending flag
+                   (setf (alist-get 'pending diff-info) nil)
+                   (puthash tab-name diff-info active-diffs)
+                   ;; Start the ediff session
+                   (when (and buffer-A (buffer-live-p buffer-A)
+                              buffer-B (buffer-live-p buffer-B))
+                     (claude-code-ide-mcp--start-ediff-session
+                      tab-name session buffer-A buffer-B))))))))))
+   claude-code-ide-mcp--sessions))
+
 ;;; Public API
 
 (defun claude-code-ide-mcp-create-session (project-dir session-id &optional instance-name)
@@ -950,6 +994,8 @@ an explicit prompt insertion, so it targets exactly one instance."
          (end-line (if (use-region-p)
                        (1- (line-number-at-pos (region-end)))
                      (1- (line-number-at-pos (point))))))
+
+    (setq file-path (file-local-name file-path))
     (claude-code-ide-mcp--send-notification
      "at_mentioned"
      `((filePath . ,file-path)

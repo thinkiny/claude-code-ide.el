@@ -136,7 +136,7 @@ routing tests depend on the carried text, not a placeholder."
   "Mock vterm-send-key function for testing."
   nil)
 
-(provide (quote vterm))
+(provide 'vterm)
 
 ;; === Mock ghostel module ===
 (defvar ghostel-buffer-name nil)
@@ -208,7 +208,7 @@ routing tests depend on the carried text, not a placeholder."
   buffer checker filename line column end-line end-column
   message level severity id)
 
-(provide (quote flycheck))
+(provide 'flycheck)
 
 ;; === Load required modules ===
 (define-error 'mcp-error "MCP Error" 'error)
