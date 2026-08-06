@@ -55,6 +55,7 @@
 (declare-function ws-body "web-server" (request))
 (declare-function ws-send "web-server" (proc msg))
 (declare-function ws-response-header "web-server" (proc code &rest headers))
+(declare-function ws-requests "web-server" (server))
 
 ;;; Server State
 
@@ -63,6 +64,22 @@
 
 
 ;;; Helper Functions
+
+(defun claude-code-ide-mcp-http-server--cleanup-deferred-connection (process)
+  "Clean up a deferred HTTP connection PROCESS.
+Removes the connection's ws-request from the server's request list
+and closes the process if still alive. Safe to call multiple times."
+  (let ((server (or (process-get process 'claude-code-ide-mcp-http-server)
+                    claude-code-ide-mcp-http-server--server)))
+    (when server
+      ;; Remove this connection's ws-request from the server's request list
+      (setf (ws-requests server)
+            (cl-remove-if (lambda (req)
+                            (eq (ws-process req) process))
+                          (ws-requests server))))
+    ;; Close the process if still alive
+    (when (process-live-p process)
+      (delete-process process))))
 
 (defun claude-code-ide-mcp-http-server--extract-session-id-from-path (headers)
   "Extract session ID from URL path in HEADERS.
@@ -77,8 +94,27 @@ Returns the session ID or nil if not found."
       (match-string 1 url))))
 
 ;;; Public Functions
+(defun claude-code-ide-mcp-http-server-start-remote (port)
+  (claude-code-ide-debug "Starting SSH Forwarding MCP HTTP for %d" port)
+  (let* ((user (file-remote-p default-directory 'user))
+         (host (file-remote-p default-directory 'host))
+         (process (start-process "ssh-mcp-http-tunnel" nil "ssh" "-N" "-R"
+                                 (format "%d:localhost:%d" port port)
+                                 (format "%s@%s" user host))))
+    (push process claude-code-ide--remote-processes)
+    (set-process-sentinel process
+                          (lambda (proc event)
+                            (claude-code-ide-debug "ssh-mcp-http-tunnel %s: %s"
+                                                   (process-name proc)
+                                                   (string-trim event))))))
 
 (defun claude-code-ide-mcp-http-server-start (&optional port)
+  (let ((result (claude-code-ide-mcp-http-server-start-local port)))
+    (if (file-remote-p default-directory)
+        (claude-code-ide-mcp-http-server-start-remote (cdr result)))
+    result))
+
+(defun claude-code-ide-mcp-http-server-start-local (&optional port)
   "Start the MCP HTTP server on PORT.
 If PORT is nil, a random available port is selected.
 Returns a cons cell of (server . port)."
@@ -149,17 +185,27 @@ with the appropriate session context."
               (claude-code-ide-debug "Received notification: %s" method)
               ;; Still close the connection for HTTP transport
               (claude-code-ide-mcp-http-server--send-empty-response request))
-          ;; Process the request with session context
-          (let* ((claude-code-ide-mcp-server--current-session-id url-session-id)
-                 (result (claude-code-ide-mcp-http-server--dispatch method params)))
-            (claude-code-ide-debug "MCP response result computed")
-            ;; Send response
-            (claude-code-ide-mcp-http-server--send-json-response
-             request 200
-             `((jsonrpc . "2.0")
-               (id . ,id)
-               (result . ,result)))
-            (claude-code-ide-debug "MCP response sent"))))
+          ;; Defer all requests with an id to avoid blocking the event loop
+          (with-slots (process) request
+            ;; Store server reference on the process for cleanup
+            (process-put process 'claude-code-ide-mcp-http-server
+                         claude-code-ide-mcp-http-server--server)
+            ;; Install sentinel to clean up if client disconnects early
+            (let ((old-sentinel (process-sentinel process)))
+              (set-process-sentinel
+               process
+               (lambda (proc event)
+                 ;; Clean up on terminal events
+                 (when (memq (process-status proc) '(exit signal closed failed))
+                   (claude-code-ide-mcp-http-server--cleanup-deferred-connection proc))
+                 ;; Call previous sentinel if any
+                 (when (and old-sentinel (not (eq old-sentinel 'internal-default-process-sentinel)))
+                   (funcall old-sentinel proc event)))))
+            ;; Schedule deferred handling
+            (run-at-time 0 nil
+                         #'claude-code-ide-mcp-http-server--handle-deferred-request
+                         process url-session-id method params id)
+            :keep-alive)))
 
     (json-parse-error
      (claude-code-ide-mcp-http-server--send-json-error
@@ -175,6 +221,55 @@ with the appropriate session context."
                             (error-message-string err))
      (claude-code-ide-mcp-http-server--send-json-error
       request nil -32603 (format "Internal error: %s" (error-message-string err))))))
+
+;;; Deferred Request Handling
+
+(defun claude-code-ide-mcp-http-server--handle-deferred-request (process session-id method params id)
+  "Handle a deferred request outside the process filter.
+PROCESS is the HTTP connection process.
+SESSION-ID is the MCP session identifier.
+METHOD is the JSON-RPC method name.
+PARAMS contains the request parameters.
+ID is the JSON-RPC request ID."
+  (condition-case err
+      (let* ((claude-code-ide-mcp-server--current-session-id session-id)
+             (result (claude-code-ide-mcp-http-server--dispatch method params)))
+        (claude-code-ide-debug "Deferred MCP response result computed")
+        (claude-code-ide-mcp-http-server--send-deferred-json-response
+         process
+         `((jsonrpc . "2.0")
+           (id . ,id)
+           (result . ,result))))
+    (quit
+     (claude-code-ide-debug "Deferred request cancelled by user")
+     (claude-code-ide-mcp-http-server--send-deferred-json-response
+      process
+      `((jsonrpc . "2.0")
+        (id . ,id)
+        (error . ((code . -32001)
+                  (message . "Operation cancelled by user"))))))
+    (error
+     (claude-code-ide-debug "Error in deferred request: %s"
+                            (error-message-string err))
+     (claude-code-ide-mcp-http-server--send-deferred-json-response
+      process
+      `((jsonrpc . "2.0")
+        (id . ,id)
+        (error . ((code . -32603)
+                  (message . ,(format "Internal error: %s"
+                                      (error-message-string err))))))))))
+
+(defun claude-code-ide-mcp-http-server--send-deferred-json-response (process body)
+  "Send JSON response to PROCESS for a deferred request.
+Sends directly to the process and cleans up the connection properly."
+  (if (process-live-p process)
+      (progn
+        (ws-response-header process 200
+                            (cons "Content-Type" "application/json")
+                            (cons "Access-Control-Allow-Origin" "*"))
+        (ws-send process (json-encode body))))
+  ;; Always clean up, whether process is live or not
+  (claude-code-ide-mcp-http-server--cleanup-deferred-connection process))
 
 ;;; MCP Protocol Implementation
 

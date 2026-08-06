@@ -411,5 +411,19 @@ Prefers the last active buffer over the registered buffer."
        (claude-code-ide-debug "Error stopping MCP server: %s"
                               (error-message-string err))))))
 
+;; claude-code-ide--remote-processes
+(defvar claude-code-ide--remote-processes nil
+  "List of active MCP SSH tunnel processes.")
+
+(defun claude-code-ide-associate-remote-to-buffer (buffer)
+  "Associate all processes in `claude-code-ide--remote-processes' to BUFFER.
+When BUFFER is killed, all associated processes will be terminated."
+  (dolist (proc claude-code-ide--remote-processes)
+    (when (process-live-p proc)
+      (set-process-filter proc (lambda (proc string) nil))
+      (set-process-buffer proc buffer)
+      (set-process-query-on-exit-flag proc nil)))
+  (setq claude-code-ide--remote-processes nil))
+
 (provide 'claude-code-ide-mcp-server)
 ;;; claude-code-ide-mcp-server.el ends here
