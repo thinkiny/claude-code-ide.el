@@ -775,6 +775,7 @@ with an explanatory error rather than operating on the dead buffer."
                               claude-code-ide-mcp--sessions)))
                   ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
                    (lambda (_) (setq displayed t)))
+                  ((symbol-function 'persp-current-name) (lambda () "main"))
                   ;; Simulate the CLI dying while the session stabilizes:
                   ;; the process exits and its sentinel kills the buffer.
                   ((symbol-function 'sleep-for)
@@ -930,7 +931,8 @@ port, window slot and terminal buffer instead of reusing the first."
                             (push process processes)
                             (cons buffer process))))
                        ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
-                        (lambda (buffer) (push buffer displayed) nil)))
+                        (lambda (buffer) (push buffer displayed) nil))
+                       ((symbol-function 'persp-current-name) (lambda () "main")))
                ;; The first instance is unnamed and asks nothing
                (claude-code-ide--start-session)
                (should (= 1 (length (claude-code-ide-mcp--sessions-for-project
@@ -1139,13 +1141,17 @@ guessed, and only that instance is torn down."
         (displayed nil))
     (unwind-protect
         (progn
-          ;; Two instances of one project plus one of another
-          (claude-code-ide-tests--make-session "/tmp/project1/" :buffer buffer1)
+          ;; Two instances of one project plus one of another, each created
+          ;; in the mocked current perspective ("main")
+          (claude-code-ide-tests--make-session "/tmp/project1/" :buffer buffer1
+                                               :persp-name "main")
           (claude-code-ide-tests--make-session "/tmp/project1/"
                                                :instance-name "review"
-                                               :buffer buffer2)
+                                               :buffer buffer2
+                                               :persp-name "main")
           (claude-code-ide-tests--make-session "/tmp/project2/"
                                                :buffer buffer3
+                                               :persp-name "main"
                                                :client (claude-code-ide-tests--make-websocket
                                                         "ws://127.0.0.1:10003"))
           (should (= (hash-table-count claude-code-ide-mcp--sessions) 3))
@@ -1154,6 +1160,8 @@ guessed, and only that instance is torn down."
                      (lambda (_prompt candidates &rest _)
                        (setq offered (mapcar #'car candidates))
                        (car (car candidates))))
+                    ((symbol-function 'persp-current-name) (lambda () "main"))
+                    ((symbol-function 'persp-names) (lambda () '("main")))
                     ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
                      (lambda (buffer) (setq displayed buffer) nil)))
             (claude-code-ide-list-sessions))
@@ -2152,6 +2160,101 @@ control buffer name plays no role (ediff derives
            (when (file-exists-p file1) (delete-file file1))
            (when (file-exists-p file2) (delete-file file2))
            (claude-code-ide-tests--clear-processes)))))))
+
+(ert-deftest claude-code-ide-test-in-home-persp-p ()
+  "Home-persp predicate matches nil home, equal names, and mismatches."
+  (let ((session (claude-code-ide-tests--make-session "/tmp/test-persp/")))
+    (unwind-protect
+        (progn
+          ;; Nil home (no persp support) always matches
+          (should (claude-code-ide-mcp--session-in-home-persp-p session))
+          ;; Equal names match
+          (setf (claude-code-ide-mcp-session-persp-name session) "A")
+          (cl-letf (((symbol-function 'persp-current-name) (lambda () "A")))
+            (should (claude-code-ide-mcp--session-in-home-persp-p session)))
+          ;; Different names do not match
+          (cl-letf (((symbol-function 'persp-current-name) (lambda () "B")))
+            (should-not (claude-code-ide-mcp--session-in-home-persp-p session))))
+      (remhash (claude-code-ide-mcp-session-session-id session)
+               claude-code-ide-mcp--sessions))))
+
+(ert-deftest claude-code-ide-test-persp-rename-repoints-sessions ()
+  "A perspective rename re-points every session pinned to the old name."
+  (claude-code-ide-tests--clear-processes)
+  (let ((session-a (claude-code-ide-tests--make-session "/tmp/persp-ren-a/"
+                                                        :persp-name "old"))
+        (session-b (claude-code-ide-tests--make-session "/tmp/persp-ren-b/"
+                                                        :persp-name "other"))
+        (session-c (claude-code-ide-tests--make-session "/tmp/persp-ren-c/"
+                                                        :persp-name nil)))
+    (unwind-protect
+        (progn
+          ;; before-hook captures the pre-rename (old) name
+          (cl-letf (((symbol-function 'persp-current-name) (lambda () "old")))
+            (claude-code-ide--persp-before-rename)
+            (should (equal claude-code-ide--persp-rename-pending "old")))
+          ;; after-hook runs with the new name current and re-points
+          ;; only the session that was pinned to the old name
+          (cl-letf (((symbol-function 'persp-current-name) (lambda () "new")))
+            (claude-code-ide--persp-after-rename))
+          (should (equal (claude-code-ide-mcp-session-persp-name session-a) "new"))
+          (should (equal (claude-code-ide-mcp-session-persp-name session-b) "other"))
+          (should (equal (claude-code-ide-mcp-session-persp-name session-c) nil))
+          ;; the pending capture is cleared after the rename
+          (should-not claude-code-ide--persp-rename-pending))
+      (claude-code-ide-tests--clear-processes))))
+
+(ert-deftest claude-code-ide-test-persp-rename-noop-without-pending ()
+  "A rename with no captured old name (spurious after-hook) is a no-op."
+  (claude-code-ide-tests--clear-processes)
+  (let ((session (claude-code-ide-tests--make-session "/tmp/persp-ren-nop/"
+                                                      :persp-name "A")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'persp-current-name) (lambda () "B")))
+          ;; No before-hook ran: nothing is repointed and nothing crashes
+          (claude-code-ide--persp-after-rename)
+          (should (equal (claude-code-ide-mcp-session-persp-name session) "A"))
+          (should-not claude-code-ide--persp-rename-pending))
+      (claude-code-ide-tests--clear-processes))))
+
+(ert-deftest claude-code-ide-test-opendiff-defers-in-foreign-persp ()
+  "openDiff in a foreign perspective stays pending until its home persp.
+A visible terminal in a non-home perspective must not launch ediff there;
+the diff starts only once the home perspective is current."
+  (claude-code-ide-tests--with-temp-directory
+   (lambda ()
+     (let* ((session (claude-code-ide-tests--make-session default-directory
+                                                          :port 12345
+                                                          :persp-name "A"))
+            (file (expand-file-name "test-persp-diff.txt" default-directory))
+            (started '()))
+       (with-temp-file file (insert "Original"))
+       (make-directory (expand-file-name ".git" default-directory) t)
+       (unwind-protect
+           (cl-letf (((symbol-function 'claude-code-ide-mcp--session-buffer-visible-p)
+                      (lambda (_) t))
+                     ((symbol-function 'claude-code-ide-mcp--start-ediff-session)
+                      (lambda (&rest _) (push t started))))
+             ;; Foreign persp B: deferred, marked pending, not started
+             (cl-letf (((symbol-function 'persp-current-name) (lambda () "B")))
+               (let ((result (claude-code-ide-mcp-handle-open-diff
+                              `((old_file_path . ,file)
+                                (new_file_path . ,file)
+                                (new_file_contents . "Modified")
+                                (tab_name . "persp-diff"))
+                              session)))
+                 (should (eq (alist-get 'deferred result) t))
+                 (should (alist-get 'pending
+                                    (gethash "persp-diff"
+                                             (claude-code-ide-mcp-session-active-diffs session))))
+                 (should-not started)))
+             ;; Home persp A: the pending trigger launches it
+             (cl-letf (((symbol-function 'persp-current-name) (lambda () "A")))
+               (claude-code-ide-mcp--maybe-start-pending-diffs)
+               (should (= 1 (length started)))))
+         (claude-code-ide-mcp-handle-close-all-diff-tabs nil session)
+         (when (file-exists-p file) (delete-file file))
+         (claude-code-ide-tests--clear-processes))))))
 
 (ert-deftest claude-code-ide-test-mcp-two-projects-deferred-isolation ()
   "Test that deferred responses are answered on their own session's socket."
