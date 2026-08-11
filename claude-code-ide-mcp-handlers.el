@@ -43,8 +43,11 @@
 (declare-function claude-code-ide-mcp-session-buffer "claude-code-ide-mcp" (session))
 (declare-function claude-code-ide-mcp-session-instance-name "claude-code-ide-mcp" (session))
 (declare-function claude-code-ide-mcp-session-port "claude-code-ide-mcp" (session))
+(declare-function claude-code-ide-mcp--session-buffer-visible-p "claude-code-ide-mcp" (session))
+(declare-function claude-code-ide-mcp--session-in-home-persp-p "claude-code-ide-mcp" (session))
 (declare-function claude-code-ide-mcp--setup-buffer-cache-hooks "claude-code-ide-mcp" ())
 (declare-function claude-code-ide--display-buffer-in-side-window "claude-code-ide" (buffer))
+(declare-function claude-code-ide--switch-to-session-persp "claude-code-ide" (session))
 (defvar ediff-control-buffer)
 (defvar ediff-buffer-B)
 (defvar ediff-window-setup-function)
@@ -114,20 +117,24 @@ Returns a cons cell (buffer-A . buffer-B)."
 
     (cons buffer-A buffer-B)))
 
+(defun claude-code-ide-scroll-buffer-windows-to-end (buffer)
+  "Scroll every window showing BUFFER to its end.
+Ghostel buffers anchor the window instead; `ghostel--anchor-window'
+keeps the view pinned to the process output, which `set-window-point'
+cannot express."
+  (dolist (win (get-buffer-window-list buffer nil t))
+    (if (derived-mode-p 'ghostel-mode)
+        (ghostel--anchor-window win t)
+      (set-window-point win (point-max)))))
+
 (defun claude-code-ide-mcp--goto-session-terminal-end (session)
-  "Scroll SESSION's terminal buffer to the end."
+  "Scroll SESSION's terminal windows to the end."
   (run-with-timer 0.5 nil
-                  (lambda (session)
-                    (when-let* ((project-dir (claude-code-ide-mcp-session-project-dir session))
-                                (buffer-name (claude-code-ide--get-buffer-name project-dir))
-                                (buffer (get-buffer buffer-name))
+                  (lambda ()
+                    (when-let* ((buffer (claude-code-ide-mcp-session-buffer session))
                                 ((buffer-live-p buffer)))
                       (with-current-buffer buffer
-                        (if (derived-mode-p 'ghostel-mode)
-                            (dolist (win (get-buffer-window-list buffer nil t))
-                              (ghostel--anchor-window win t))
-                          (goto-char (point-max))))))
-                    session))
+                        (claude-code-ide-scroll-buffer-windows-to-end buffer))))))
 
 (defun claude-code-ide-mcp--setup-diff-hooks (tab-name session saved-winconf)
   "Set up ediff hooks for TAB-NAME with SESSION and SAVED-WINCONF.
@@ -185,8 +192,11 @@ and the hook stays armed for ours."
                                 (claude-code-ide-mcp--handle-ediff-quit
                                  tab-name
                                  session)))
-                            ;; Always restore window configuration
+                            ;; Always restore window configuration, in the
+                            ;; session's home perspective (the user may have
+                            ;; switched perspectives mid-diff)
                             (when saved-winconf
+                              (claude-code-ide--switch-to-session-persp session)
                               (condition-case nil
                                   (set-window-configuration saved-winconf)
                                 (error nil)))))))
@@ -410,9 +420,7 @@ ARGUMENTS should contain:
               ;; Switch to the original tab
               (tab-bar-select-tab-by-name (alist-get 'name original-tab)))))))
 
-    ;; Save current window configuration
-    (let* ((saved-winconf (current-window-configuration))
-           (buffers (claude-code-ide-mcp--create-diff-buffers
+    (let* ((buffers (claude-code-ide-mcp--create-diff-buffers
                      old-file-path new-file-contents tab-name))
            (buffer-A (car buffers))
            (buffer-B (cdr buffers))
@@ -426,17 +434,16 @@ ARGUMENTS should contain:
                    (old-file-path . ,old-file-path)
                    (new-file-path . ,new-file-path)
                    (file-exists . ,file-exists)
-                   (saved-winconf . ,saved-winconf)
                    (session . ,session)  ; Store the session reference
                    (created-at . ,(current-time)))
                  active-diffs))
 
-      ;; Only start ediff while the instance's terminal is visible in the
-      ;; selected frame.  Under per-perspective/per-tab window layouts a
-      ;; hidden instance must not seize the current layout; defer instead
-      ;; and let `claude-code-ide-mcp--maybe-start-pending-diffs' launch it
-      ;; when the buffer becomes visible again.
-      (if (claude-code-ide-mcp--session-buffer-visible-p session)
+      ;; Only start ediff when the terminal is visible and the current
+      ;; perspective is the instance's home; a hidden or foreign-persp
+      ;; instance defers until `claude-code-ide-mcp--maybe-start-pending-diffs'
+      ;; can launch it in its home perspective.
+      (if (and (claude-code-ide-mcp--session-buffer-visible-p session)
+               (claude-code-ide-mcp--session-in-home-persp-p session))
           (claude-code-ide-mcp--start-ediff-session tab-name session buffer-A buffer-B)
         (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
           (when-let* ((diff-info (gethash tab-name active-diffs)))
@@ -450,11 +457,10 @@ ARGUMENTS should contain:
 
 (defun claude-code-ide-mcp--start-ediff-session (tab-name session buffer-A buffer-B)
   "Start an ediff session for TAB-NAME with SESSION comparing BUFFER-A and BUFFER-B.
-Clears side windows, sets up hooks, and launches ediff.  SESSION's stored
-`saved-winconf' is restored by the ediff quit hook."
-  (let* ((active-diffs (claude-code-ide-mcp--get-active-diffs session))
-         (diff-info (gethash tab-name active-diffs))
-         (saved-winconf (alist-get 'saved-winconf diff-info))
+Clears side windows, sets up hooks, and launches ediff.  The window
+configuration captured here, at launch time and so in the persp the diff
+actually opens in, is restored by the ediff quit hook."
+  (let* ((saved-winconf (current-window-configuration))
          (hooks (claude-code-ide-mcp--setup-diff-hooks tab-name session saved-winconf))
          (before-setup-hook-fn (car hooks))
          (startup-hook-fn (cdr hooks)))

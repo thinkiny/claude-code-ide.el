@@ -61,6 +61,7 @@
 (declare-function claude-code-ide-mcp--build-tool-descriptions "claude-code-ide-mcp-handlers" ())
 (declare-function claude-code-ide-mcp--start-ediff-session "claude-code-ide-mcp-handlers" (tab-name session buffer-A buffer-B))
 (declare-function claude-code-ide-mcp--get-active-diffs "claude-code-ide-mcp-handlers" (&optional session))
+(declare-function persp-current-name "perspective" ())
 
 ;;; Constants
 
@@ -135,6 +136,7 @@ Set to nil when cache needs to be invalidated.")
   last-buffer      ; Last active buffer
   active-diffs     ; Hash table of active diffs
   original-tab     ; Original tab-bar tab where Claude was opened
+  persp-name       ; Name of the perspective Claude was opened in (perspective.el), or nil
   cli-pid)         ; PID of the connected CLI process
 
 (defun claude-code-ide-mcp--get-buffer-project ()
@@ -828,19 +830,32 @@ deduplicated."
 ;;; Buffer Visibility Support
 
 (defun claude-code-ide-mcp--session-buffer-visible-p (session)
-  "Return non-nil if SESSION's claude-code buffer is visible in some window."
-  (when-let* ((project-dir (claude-code-ide-mcp-session-project-dir session))
-              (claude-buffer (get-buffer (claude-code-ide--get-buffer-name project-dir))))
-    (get-buffer-window claude-buffer)))
+  "Return non-nil if SESSION's claude-code buffer is visible in some window.
+The instance's own terminal buffer is the source of truth: a name
+reconstructed from the project dir resolves to the base name only, so a
+second or named instance (whose buffer is uniquified) would never match.
+Visibility is checked across all frames so a Claude window on another
+frame still counts as visible."
+  (when-let* ((buffer (claude-code-ide-mcp-session-buffer session)))
+    (and (buffer-live-p buffer)
+         (get-buffer-window buffer t))))
+
+(defun claude-code-ide-mcp--session-in-home-persp-p (session)
+  "Non-nil if SESSION's home perspective is the current one.
+A nil home (session predates persp support) counts as matching."
+  (let ((home (claude-code-ide-mcp-session-persp-name session)))
+    (or (null home)
+        (equal home (persp-current-name)))))
 
 (defun claude-code-ide-mcp--maybe-start-pending-diffs (&optional _frame)
-  "Start any pending diffs for sessions whose claude-code buffer is visible.
+  "Start pending diffs for sessions visible in their home perspective.
 Intended for use on `window-buffer-change-functions'.
 Optional argument _FRAME is the frame where the change occurred (ignored)."
   (maphash
    (lambda (_project-dir session)
-     ;; Only proceed if the claude-code buffer exists and is visible
-     (when (claude-code-ide-mcp--session-buffer-visible-p session)
+     ;; Only launch when the buffer is visible in its home perspective
+     (when (and (claude-code-ide-mcp--session-buffer-visible-p session)
+                (claude-code-ide-mcp--session-in-home-persp-p session))
        (let ((active-diffs (claude-code-ide-mcp--get-active-diffs session)))
          (when active-diffs
            (let ((pending-tabs '()))

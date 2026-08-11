@@ -98,6 +98,11 @@
 (declare-function ghostel-send-string "ghostel" (string))
 (declare-function ghostel--window-adjust-process-window-size "ghostel" (process windows))
 
+;; External function declarations for perspective.el
+(declare-function persp-current-name "perspective" ())
+(declare-function persp-names "perspective" ())
+(declare-function persp-switch "perspective" (name &optional norecord))
+
 ;;; Customization
 
 (defgroup claude-code-ide nil
@@ -363,6 +368,12 @@ a more stable viewing experience when working with multiple windows."
 
 (defvar claude-code-ide--last-accessed-buffer nil
   "The most recently accessed Claude Code buffer.")
+
+(defvar claude-code-ide--persp-rename-pending nil
+  "Old perspective name captured while `persp-rename' is in progress.
+Non-nil only between `persp-before-rename-hook' and
+`persp-after-rename-hook', which bracket the rewrite of the
+perspective's name in its own data structures.")
 
 
 ;;; Vterm Rendering Optimization
@@ -929,6 +940,10 @@ most recently used one — only displaying or hiding windows would."
   (when (= (hash-table-count claude-code-ide-mcp--sessions) 1)
     (add-hook 'window-selection-change-functions
               #'claude-code-ide--note-window-selection)
+    (add-hook 'window-buffer-change-functions
+              #'claude-code-ide-mcp--maybe-start-pending-diffs)
+    (add-hook 'persp-before-rename-hook #'claude-code-ide--persp-before-rename)
+    (add-hook 'persp-after-rename-hook #'claude-code-ide--persp-after-rename)
     (when (boundp 'tab-bar-tab-post-open-functions)
       (add-hook 'tab-bar-tab-post-open-functions
                 #'claude-code-ide--strip-new-tab-claude-windows))
@@ -952,6 +967,38 @@ most recently used one — only displaying or hiding windows would."
 
 ;; Ensure cleanup on Emacs exit
 (add-hook 'kill-emacs-hook #'claude-code-ide--cleanup-all-sessions)
+
+(defun claude-code-ide--persp-before-rename ()
+  "Record the old perspective name before `persp-rename' rewires it.
+Runs on `persp-before-rename-hook', while the current perspective
+still carries its old name; `claude-code-ide--persp-after-rename'
+consumes the saved name after the rename is committed."
+  (setq claude-code-ide--persp-rename-pending (persp-current-name)))
+
+(defun claude-code-ide--persp-after-rename ()
+  "Follow a perspective rename on every session pinned to the old name.
+Runs on `persp-after-rename-hook', once the current perspective has
+been renamed.  Sessions whose stored home matches the pre-rename name
+are re-pointed at the new name so the home-persp gate, the
+switch-to-home routing and list-sessions filtering keep comparing
+against a live perspective name."
+  (let ((old claude-code-ide--persp-rename-pending))
+    (setq claude-code-ide--persp-rename-pending nil)
+    (when (and old (not (equal old (persp-current-name))))
+      (let ((new-name (persp-current-name)))
+        (dolist (session (claude-code-ide-mcp--active-sessions))
+          (when (equal (claude-code-ide-mcp-session-persp-name session) old)
+            (setf (claude-code-ide-mcp-session-persp-name session) new-name)))))))
+
+(defun claude-code-ide--switch-to-session-persp (session)
+  "Switch to SESSION's home perspective.
+No-op unless the session stored a perspective name that still exists
+and is not already current.  Keeps a session's terminal buffer living
+in exactly one perspective."
+  (when-let* ((name (claude-code-ide-mcp-session-persp-name session))
+              ((member name (persp-names)))
+              ((not (equal name (persp-current-name)))))
+    (persp-switch name)))
 
 (defun claude-code-ide--display-buffer-in-side-window (buffer)
   "Display BUFFER in a side window according to customization.
@@ -1051,6 +1098,10 @@ hook signals wrong-type-argument that way)."
     (when (= (hash-table-count claude-code-ide-mcp--sessions) 0)
       (remove-hook 'window-selection-change-functions
                    #'claude-code-ide--note-window-selection)
+      (remove-hook 'window-buffer-change-functions
+                   #'claude-code-ide-mcp--maybe-start-pending-diffs)
+      (remove-hook 'persp-before-rename-hook #'claude-code-ide--persp-before-rename)
+      (remove-hook 'persp-after-rename-hook #'claude-code-ide--persp-after-rename)
       (when (boundp 'tab-bar-tab-post-open-functions)
         (remove-hook 'tab-bar-tab-post-open-functions
                      #'claude-code-ide--strip-new-tab-claude-windows))
@@ -1117,10 +1168,15 @@ If the window is not visible, it will be shown in a side window."
           (claude-code-ide-debug "Claude Code window hidden"))
       ;; Window is not visible, show it
       (progn
-        (claude-code-ide--display-buffer-in-side-window buffer)
-        ;; Update the original tab when showing the window
-        (when (fboundp 'tab-bar--current-tab)
-          (setf (claude-code-ide-mcp-session-original-tab session) (tab-bar--current-tab)))
+        (claude-code-ide--switch-to-session-persp session)
+        ;; The switch may have restored a layout that already shows the
+        ;; buffer; reveal that window instead of displaying a duplicate.
+        (if-let* ((shown (get-buffer-window buffer)))
+            (select-window shown)
+          (claude-code-ide--display-buffer-in-side-window buffer)
+          ;; Update the original tab when showing the window
+          (when (fboundp 'tab-bar--current-tab)
+            (setf (claude-code-ide-mcp-session-original-tab session) (tab-bar--current-tab))))
         (claude-code-ide-debug "Claude Code window shown")))))
 
 (defun claude-code-ide--build-claude-command (&optional continue resume session-id)
@@ -1450,6 +1506,7 @@ This function handles:
             (claude-code-ide-mcp-server-update-session-buffer session-id buffer)
             (with-current-buffer buffer
               (setq-local claude-code-ide--session session))
+            (setf (claude-code-ide-mcp-session-persp-name session) (persp-current-name))
             ;; Install global terminal advice for the first live instance
             (claude-code-ide--maybe-install-global-advice)
             ;; Set up process sentinel to clean up when Claude exits.
@@ -1664,6 +1721,7 @@ navigation overrides `claude-code-ide-focus-on-open'."
     (unless session
       (user-error "No Claude Code session for this project.  Use M-x claude-code-ide to start one"))
     (let ((buffer (claude-code-ide-mcp-session-buffer session)))
+      (claude-code-ide--switch-to-session-persp session)
       (if-let* ((window (and buffer (get-buffer-window buffer))))
           ;; Buffer is visible, just focus it
           (select-window window)
@@ -1673,10 +1731,15 @@ navigation overrides `claude-code-ide-focus-on-open'."
 
 ;;;###autoload
 (defun claude-code-ide-list-sessions ()
-  "List all active Claude Code instances and switch to the selected one."
+  "List active Claude Code sessions in the current perspective and switch.
+Sessions pinned to other perspectives are kept out of the list."
   (interactive)
   (claude-code-ide--cleanup-dead-sessions)
-  (let* ((sessions (sort (claude-code-ide-mcp--active-sessions)
+  (let* ((sessions (sort (cl-remove-if-not
+                          (lambda (session)
+                            (equal (claude-code-ide-mcp-session-persp-name session)
+                                   (persp-current-name)))
+                          (claude-code-ide-mcp--active-sessions))
                          (lambda (a b)
                            (> (or (claude-code-ide-mcp-session-last-used a) 0)
                               (or (claude-code-ide-mcp-session-last-used b) 0)))))
@@ -1697,10 +1760,15 @@ navigation overrides `claude-code-ide-focus-on-open'."
           (when session
             (let ((buffer (claude-code-ide-mcp-session-buffer session)))
               (if (and buffer (buffer-live-p buffer))
-                  (when-let* ((window (claude-code-ide--display-buffer-in-side-window buffer)))
-                    (select-window window))
+                  (progn
+                    (claude-code-ide--switch-to-session-persp session)
+                    ;; The switch may already show the buffer (persp-restored
+                    ;; layout); select it instead of displaying a duplicate.
+                    (when-let* ((window (or (get-buffer-window buffer)
+                                            (claude-code-ide--display-buffer-in-side-window buffer))))
+                      (select-window window)))
                 (user-error "Buffer for session %s no longer exists" choice)))))
-      (claude-code-ide-log "No active Claude Code sessions"))))
+      (claude-code-ide-log "No active Claude Code sessions in the current perspective"))))
 
 ;;;###autoload
 (defun claude-code-ide-insert-at-mentioned ()
@@ -1898,6 +1966,9 @@ ALL-PROJECTS, show the instances of all projects."
         (when (and buffer
                    (buffer-live-p buffer)
                    (not (claude-code-ide--session-visible-p session)))
+          ;; Reveal in the session's home perspective so the buffer is not
+          ;; bound into the current (possibly foreign) one.
+          (claude-code-ide--switch-to-session-persp session)
           (claude-code-ide--display-buffer-in-side-window buffer)
           (cl-incf shown))))
     (message (if (zerop shown)
@@ -1936,6 +2007,7 @@ window layouts, so each tab hides and restores its own set."
                                    (claude-code-ide--hidden-panel-get :all))))
         (claude-code-ide--hidden-panel-set :all nil)
         (dolist (session restore)
+          (claude-code-ide--switch-to-session-persp session)
           (claude-code-ide--display-buffer-in-side-window
            (claude-code-ide-mcp-session-buffer session)))
         (message "Restored %d Claude Code window%s"
@@ -1944,6 +2016,9 @@ window layouts, so each tab hides and restores its own set."
      ;; No remembered set, show the most recent one
      ((and claude-code-ide--last-accessed-buffer
            (buffer-live-p claude-code-ide--last-accessed-buffer))
+      (when-let* ((session (claude-code-ide--buffer-session
+                            claude-code-ide--last-accessed-buffer)))
+        (claude-code-ide--switch-to-session-persp session))
       (claude-code-ide--display-buffer-in-side-window claude-code-ide--last-accessed-buffer)
       (message "Opened most recent Claude Code session"))
 
