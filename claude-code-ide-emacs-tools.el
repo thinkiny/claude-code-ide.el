@@ -267,7 +267,6 @@ index holds no symbols."
         (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (condition-case err
-          <<<<<<< HEAD
           (let ((target-buffer (or (find-buffer-visiting file-path)
                                    (and (file-regular-p file-path)
                                         (find-file-noselect file-path)))))
@@ -448,6 +447,7 @@ If INCLUDE_CHILDREN is non-nil, include child nodes."
    :function #'claude-code-ide-mcp-xref-find-references
    :name "claude-code-ide-mcp-xref-find-references"
    :description "Find where a function, variable, or class is used throughout your codebase. Perfect for understanding code dependencies and impact analysis"
+   :annotations '((readOnlyHint . t))
    :args '((:name "identifier"
                   :type string
                   :description "The identifier to find references for")
@@ -459,6 +459,7 @@ If INCLUDE_CHILDREN is non-nil, include child nodes."
    :function #'claude-code-ide-mcp-xref-find-apropos
    :name "claude-code-ide-mcp-xref-find-apropos"
    :description "Search for functions, variables, or classes by name pattern across your project. Helps you discover code elements when you know part of the name"
+   :annotations '((readOnlyHint . t))
    :args '((:name "pattern"
                   :type string
                   :description "The pattern to search for symbols")
@@ -471,6 +472,7 @@ If INCLUDE_CHILDREN is non-nil, include child nodes."
    :function #'claude-code-ide-mcp-project-info
    :name "claude-code-ide-mcp-project-info"
    :description "Get quick overview of your current project context including directory, active file, and project size"
+   :annotations '((readOnlyHint . t))
    :args nil)
 
   ;; Register imenu tool
@@ -478,6 +480,7 @@ If INCLUDE_CHILDREN is non-nil, include child nodes."
    :function #'claude-code-ide-mcp-imenu-list-symbols
    :name "claude-code-ide-mcp-imenu-list-symbols"
    :description "Navigate and explore a file's structure by listing all its functions, classes, and variables with their locations. Nested symbols are included, each prefixed with its enclosing scopes as [Outer > Inner]"
+   :annotations '((readOnlyHint . t))
    :args '((:name "file_path"
                   :type string
                   :description "Path to the file to analyze for symbols")))
@@ -487,6 +490,7 @@ If INCLUDE_CHILDREN is non-nil, include child nodes."
    :function #'claude-code-ide-mcp-treesit-info
    :name "claude-code-ide-mcp-treesit-info"
    :description "Get tree-sitter syntax tree information for a file, including node types, ranges, and hierarchical structure. Useful for understanding code structure and AST analysis"
+   :annotations '((readOnlyHint . t))
    :args '((:name "file_path"
                   :type string
                   :description "Path to the file to analyze")

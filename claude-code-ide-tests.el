@@ -2547,6 +2547,32 @@ sibling instance."
       (claude-code-ide-mcp-http-server--handle-get mock-request)
       (should (equal claude-code-ide-mcp-server-tests--last-response-status 404)))))
 
+(ert-deftest claude-code-ide-mcp-http-server-test-tool-annotations ()
+  "Tool annotations are serialized only when explicitly configured."
+  (require 'claude-code-ide-mcp-http-server)
+  (let* ((annotated-tool
+          (claude-code-ide-mcp-http-server--tool-to-mcp
+           '(:function ignore
+             :name "read_only_tool"
+             :description "Read-only test tool"
+             :annotations ((readOnlyHint . t)))))
+         (unannotated-tool
+          (claude-code-ide-mcp-http-server--tool-to-mcp
+           '(:function ignore
+             :name "unannotated_tool"
+             :description "Unannotated test tool"))))
+    (should (equal (alist-get 'annotations annotated-tool)
+                   '((readOnlyHint . t))))
+    (should-not (assq 'annotations unannotated-tool))))
+
+(ert-deftest claude-code-ide-mcp-http-server-test-protocol-version ()
+  "The HTTP MCP server advertises a revision supporting annotations."
+  (require 'claude-code-ide-mcp-http-server)
+  (should (equal
+           (alist-get 'protocolVersion
+                      (claude-code-ide-mcp-http-server--handle-initialize nil))
+           "2025-03-26")))
+
 ;;; MCP Server Session Context Tests
 
 (ert-deftest claude-code-ide-mcp-server-test-session-registration ()
@@ -3017,7 +3043,8 @@ RESULT is the list `claude-code-ide-mcp-imenu-list-symbols' returns."
                                         (:name "arg2"
                                                :type "number"
                                                :required nil
-                                               :description "Second argument")))))
+                                               :description "Second argument"))
+                           :annotations ((readOnlyHint . t)))))
 
     ;; Check format detection
     (should (eq (claude-code-ide--tool-format-p old-format-tool) 'old))
@@ -3033,7 +3060,9 @@ RESULT is the list `claude-code-ide-mcp-imenu-list-symbols' returns."
           (should (eq (plist-get normalized :function) 'test-tool-func))
           (should (equal (plist-get normalized :name) "test-tool-func"))
           (should (equal (plist-get normalized :description) "Test tool in old format"))
-          (should (equal (length (plist-get normalized :args)) 2))))
+          (should (equal (length (plist-get normalized :args)) 2))
+          (should (equal (plist-get normalized :annotations)
+                         '((readOnlyHint . t))))))
       ;; Verify warning was emitted
       (should warning-msg)
       (should (string-match "test-tool-func.*deprecated.*claude-code-ide-make-tool" warning-msg))))
@@ -3043,6 +3072,7 @@ RESULT is the list `claude-code-ide-mcp-imenu-list-symbols' returns."
                           :function #'test-tool-func
                           :name "test_tool_new"
                           :description "Test tool in new format"
+                          :annotations '((readOnlyHint . t))
                           :args '((:name "arg1"
                                          :type string
                                          :description "First argument")
@@ -3059,6 +3089,8 @@ RESULT is the list `claude-code-ide-mcp-imenu-list-symbols' returns."
       (should (eq (plist-get normalized :function) 'test-tool-func))
       (should (equal (plist-get normalized :name) "test_tool_new"))
       (should (equal (plist-get normalized :description) "Test tool in new format"))
+      (should (equal (plist-get normalized :annotations)
+                     '((readOnlyHint . t))))
       (let ((args (plist-get normalized :args)))
         (should (equal (length args) 2))
         ;; Check first argument
@@ -3094,36 +3126,51 @@ RESULT is the list `claude-code-ide-mcp-imenu-list-symbols' returns."
     (should (eq (plist-get (cadr normalized-tools) :function) 'test-func-new))))
 
 (ert-deftest claude-code-ide-emacs-tools-test-tool-configuration ()
-  "Test that imenu tool is properly configured."
+  "Test that inspection tools are configured as read-only."
   (require 'claude-code-ide-emacs-tools)
   (require 'claude-code-ide-mcp-server)
 
-  ;; Setup tools first
-  (claude-code-ide-emacs-tools-setup)
+  (let ((claude-code-ide-mcp-server-tools nil))
+    (claude-code-ide-emacs-tools-setup)
+    (let ((expected-functions
+           '(claude-code-ide-mcp-xref-find-references
+             claude-code-ide-mcp-xref-find-apropos
+             claude-code-ide-mcp-project-info
+             claude-code-ide-mcp-imenu-list-symbols
+             claude-code-ide-mcp-treesit-info)))
+      (dolist (expected-function expected-functions)
+        (let* ((tool
+                (cl-find-if
+                 (lambda (candidate)
+                   (eq (plist-get
+                        (claude-code-ide--normalize-tool-spec candidate)
+                        :function)
+                       expected-function))
+                 claude-code-ide-mcp-server-tools))
+               (normalized (and tool
+                                (claude-code-ide--normalize-tool-spec tool))))
+          (should tool)
+          (should (equal (plist-get normalized :annotations)
+                         '((readOnlyHint . t)))))))
 
-  ;; Find the imenu tool in the registered tools
-  (let ((imenu-tool (cl-find-if
-                     (lambda (tool)
-                       (let ((normalized (claude-code-ide--normalize-tool-spec tool)))
-                         (eq (plist-get normalized :function)
-                             'claude-code-ide-mcp-imenu-list-symbols)))
-                     claude-code-ide-mcp-server-tools)))
-    (should imenu-tool)
-
-    ;; Normalize the tool to check its properties
-    (let ((normalized (claude-code-ide--normalize-tool-spec imenu-tool)))
-      ;; Check description
-      (should (equal (plist-get normalized :description)
-                     "Navigate and explore a file's structure by listing all its functions, classes, and variables with their locations. Nested symbols are included, each prefixed with its enclosing scopes as [Outer > Inner]"))
-
-      ;; Check args
+    (let* ((imenu-tool
+            (cl-find-if
+             (lambda (tool)
+               (eq (plist-get (claude-code-ide--normalize-tool-spec tool)
+                              :function)
+                   'claude-code-ide-mcp-imenu-list-symbols))
+             claude-code-ide-mcp-server-tools))
+           (normalized (claude-code-ide--normalize-tool-spec imenu-tool)))
+      (should (equal
+               (plist-get normalized :description)
+               "Navigate and explore a file's structure by listing all its functions, classes, and variables with their locations. Nested symbols are included, each prefixed with its enclosing scopes as [Outer > Inner]"))
       (let ((args (plist-get normalized :args)))
         (should (= (length args) 1))
-        (let ((file-path-arg (car args)))
-          (should (equal (plist-get file-path-arg :name) "file_path"))
-          (should (eq (plist-get file-path-arg :type) 'string))
-          (should (not (plist-get file-path-arg :optional)))
-          (should (equal (plist-get file-path-arg :description)
+        (let ((file-path-argument (car args)))
+          (should (equal (plist-get file-path-argument :name) "file_path"))
+          (should (eq (plist-get file-path-argument :type) 'string))
+          (should-not (plist-get file-path-argument :optional))
+          (should (equal (plist-get file-path-argument :description)
                          "Path to the file to analyze for symbols")))))))
 
 ;;; Multi-Instance Tests
