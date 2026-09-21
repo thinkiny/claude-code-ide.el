@@ -121,6 +121,9 @@ takes no arguments.  Each plist in ARGS should have the following keys:
 - :items - For array types, a plist describing the array items
 - :properties - For object types, a plist of property specifications
 
+ANNOTATIONS: An optional alist of MCP tool behavior hints, such as
+`((readOnlyHint . t))'.
+
 CATEGORY: A string indicating a category for the tool (optional).
 
 The tool is automatically added to `claude-code-ide-mcp-server-tools'.
@@ -129,6 +132,7 @@ Returns the tool specification for convenience."
         (name (plist-get slots :name))
         (description (plist-get slots :description))
         (args (plist-get slots :args))
+        (annotations (plist-get slots :annotations))
         (category (plist-get slots :category)))
     ;; Validate required parameters
     (unless function
@@ -144,6 +148,8 @@ Returns the tool specification for convenience."
                       :description description)))
       (when args
         (setq spec (plist-put spec :args args)))
+      (when annotations
+        (setq spec (plist-put spec :annotations annotations)))
       (when category
         (setq spec (plist-put spec :category category)))
       ;; Add to the tools list
@@ -181,14 +187,18 @@ Returns a consistent plist format with :args."
       (let* ((func (car tool-spec))
              (plist (cdr tool-spec))
              (description (plist-get plist :description))
-             (parameters (plist-get plist :parameters)))
+             (parameters (plist-get plist :parameters))
+             (annotations (plist-get plist :annotations))
+             (normalized (list :function func
+                               :name (symbol-name func)
+                               :description description
+                               :args (claude-code-ide--parameters-to-args parameters))))
         ;; Emit deprecation warning
         (message "Warning: Tool '%s' is using deprecated format. Please use `claude-code-ide-make-tool' instead."
                  (symbol-name func))
-        (list :function func
-              :name (symbol-name func)
-              :description description
-              :args (claude-code-ide--parameters-to-args parameters))))
+        (when annotations
+          (setq normalized (plist-put normalized :annotations annotations)))
+        normalized))
      ((eq format 'new)
       ;; New format - already in the right format, just return it
       tool-spec)

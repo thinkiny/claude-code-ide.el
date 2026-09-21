@@ -59,6 +59,9 @@
 
 ;;; Server State
 
+(defconst claude-code-ide-mcp-http-server-protocol-version "2025-03-26"
+  "MCP protocol revision implemented by the HTTP tools server.")
+
 (defvar claude-code-ide-mcp-http-server--server nil
   "The web-server instance.")
 
@@ -289,7 +292,7 @@ PARAMS is the parameters alist."
 
 (defun claude-code-ide-mcp-http-server--handle-initialize (_params)
   "Handle the initialize method."
-  `((protocolVersion . "2024-11-05")
+  `((protocolVersion . ,claude-code-ide-mcp-http-server-protocol-version)
     (capabilities . ((tools . ((listChanged . :json-false)))
                      (logging . ,(make-hash-table :test 'equal))))
     (serverInfo . ((name . "claude-code-ide-mcp-tools")
@@ -348,9 +351,12 @@ TOOL-SPEC should already be normalized."
   (let* ((name (or (plist-get tool-spec :name)
                    (symbol-name (plist-get tool-spec :function))))
          (description (plist-get tool-spec :description))
-         (args (plist-get tool-spec :args)))
+         (args (plist-get tool-spec :args))
+         (annotations (plist-get tool-spec :annotations)))
     `((name . ,name)
       (description . ,description)
+      ,@(when annotations
+          `((annotations . ,annotations)))
       (inputSchema . ((type . "object")
                       (properties . ,(claude-code-ide-mcp-http-server--args-to-schema args))
                       (required . ,(claude-code-ide-mcp-http-server--required-args args)))))))
