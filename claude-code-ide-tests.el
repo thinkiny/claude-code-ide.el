@@ -335,6 +335,18 @@ have completed before cleanup.  Waits up to 5 seconds."
      (let ((expected (expand-file-name default-directory)))
        (should (equal (claude-code-ide--get-working-directory) expected))))))
 
+(ert-deftest claude-code-ide-test-common-path-length ()
+  "Test shared path component counting."
+  ;; Trailing slash does not matter
+  (should (= 2 (claude-code-ide--common-path-length "/tmp/a/" "/tmp/a")))
+  ;; Parent and child share the parent's components
+  (should (= 2 (claude-code-ide--common-path-length "/tmp/a/" "/tmp/a/b/")))
+  ;; Siblings share everything above the branch point
+  (should (= 2 (claude-code-ide--common-path-length "/tmp/a/b" "/tmp/a/c")))
+  (should (= 1 (claude-code-ide--common-path-length "/tmp/a" "/tmp/x")))
+  ;; Unrelated paths share nothing
+  (should (= 0 (claude-code-ide--common-path-length "/tmp/a/b" "/private/c"))))
+
 (ert-deftest claude-code-ide-test-get-buffer-name ()
   "Test buffer name generation using custom function."
   ;; Test with custom function
@@ -1175,6 +1187,77 @@ guessed, and only that instance is torn down."
           (should (cl-find-if (lambda (c) (string-match-p "waiting" c)) offered))
           (should (memq displayed (list buffer1 buffer2 buffer3))))
       (dolist (buffer (list buffer1 buffer2 buffer3))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))
+      (claude-code-ide-tests--clear-processes))))
+
+(ert-deftest claude-code-ide-test-list-sessions-distance-order ()
+  "Test that session listing orders by proximity to the working directory.
+The current project's sessions come first, then longest shared path
+prefix, with directories containing the working directory before
+other equally close ones; remaining ties order by most recent use."
+  (claude-code-ide-tests--clear-processes)
+  (let ((buffer1 (generate-new-buffer "*claude-order-1*"))
+        (buffer2 (generate-new-buffer "*claude-order-2*"))
+        (buffer3 (generate-new-buffer "*claude-order-3*"))
+        (buffer4 (generate-new-buffer "*claude-order-4*"))
+        (buffer5 (generate-new-buffer "*claude-order-5*"))
+        (buffer6 (generate-new-buffer "*claude-order-6*"))
+        (offered nil))
+    (unwind-protect
+        (progn
+          ;; Six instances across nested and unrelated projects
+          (claude-code-ide-tests--make-session "/tmp/parent/"
+                                               :buffer buffer1
+                                               :persp-name "main"
+                                               :last-used 300.0)
+          (claude-code-ide-tests--make-session "/tmp/parent/"
+                                               :instance-name "old"
+                                               :buffer buffer2
+                                               :persp-name "main"
+                                               :last-used 100.0)
+          (claude-code-ide-tests--make-session "/tmp/parent/sub1/"
+                                               :buffer buffer3
+                                               :persp-name "main"
+                                               :last-used 400.0)
+          (claude-code-ide-tests--make-session "/tmp/parent/sub1/deep/"
+                                               :buffer buffer4
+                                               :persp-name "main"
+                                               :last-used 200.0)
+          (claude-code-ide-tests--make-session "/tmp/"
+                                               :buffer buffer5
+                                               :persp-name "main"
+                                               :last-used 50.0)
+          (claude-code-ide-tests--make-session "/tmp/other/"
+                                               :buffer buffer6
+                                               :persp-name "main"
+                                               :last-used 500.0)
+          (should (= (hash-table-count claude-code-ide-mcp--sessions) 6))
+
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt candidates &rest _)
+                       (setq offered (mapcar #'car candidates))
+                       (car (car candidates))))
+                    ((symbol-function 'persp-current-name) (lambda () "main"))
+                    ((symbol-function 'persp-names) (lambda () '("main")))
+                    ((symbol-function 'claude-code-ide--get-working-directory)
+                     (lambda () "/tmp/parent/"))
+                    ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
+                     (lambda (_buffer) nil)))
+            (claude-code-ide-list-sessions))
+
+          ;; Exact project first (most recently used among them), then
+          ;; shared prefix depth, ancestors before siblings, then recency
+          (should (equal (mapcar (lambda (candidate)
+                                   (cond ((string-prefix-p "parent:old —" candidate) 'parent-old)
+                                         ((string-prefix-p "parent —" candidate) 'parent)
+                                         ((string-prefix-p "deep —" candidate) 'deep)
+                                         ((string-prefix-p "sub1 —" candidate) 'sub1)
+                                         ((string-prefix-p "tmp —" candidate) 'tmp)
+                                         ((string-prefix-p "other —" candidate) 'other)))
+                                 offered)
+                         '(parent parent-old sub1 deep tmp other))))
+      (dolist (buffer (list buffer1 buffer2 buffer3 buffer4 buffer5 buffer6))
         (when (buffer-live-p buffer)
           (kill-buffer buffer)))
       (claude-code-ide-tests--clear-processes))))

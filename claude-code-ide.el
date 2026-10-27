@@ -716,6 +716,48 @@ width has actually changed, working around the scrolling glitch."
       (expand-file-name (project-root project))
     (expand-file-name default-directory)))
 
+(defun claude-code-ide--common-path-length (dir-a dir-b)
+  "Return the number of leading path components DIR-A and DIR-B share.
+\"/a/b/\" and \"/a/b/c/\" share 2 components (\"a\" and \"b\");
+unrelated absolute paths share 0.  A larger count means the two
+directories are closer together."
+  (let ((a (split-string (directory-file-name (expand-file-name dir-a)) "/" t))
+        (b (split-string (directory-file-name (expand-file-name dir-b)) "/" t))
+        (n 0))
+    (while (and a b (equal (car a) (car b)))
+      (cl-incf n)
+      (pop a)
+      (pop b))
+    n))
+
+(defun claude-code-ide--session-closer-p (session-a session-b cwd)
+  "Return non-nil when SESSION-A ranks before SESSION-B relative to CWD.
+Sessions of CWD itself come first, then those sharing a longer path
+prefix with CWD; among equally close directories, ones containing
+CWD rank before the rest.  Remaining ties order by most recent use
+and finally by session id."
+  (let* ((dir-a (claude-code-ide-mcp-session-project-dir session-a))
+         (dir-b (claude-code-ide-mcp-session-project-dir session-b))
+         (exact-a (string= dir-a cwd))
+         (exact-b (string= dir-b cwd))
+         (common-a (claude-code-ide--common-path-length cwd dir-a))
+         (common-b (claude-code-ide--common-path-length cwd dir-b))
+         (ancestor-a (string-prefix-p (concat (directory-file-name dir-a) "/") cwd))
+         (ancestor-b (string-prefix-p (concat (directory-file-name dir-b) "/") cwd))
+         (used-a (or (claude-code-ide-mcp-session-last-used session-a) 0))
+         (used-b (or (claude-code-ide-mcp-session-last-used session-b) 0)))
+    (cond
+     ;; Sessions of the current project outrank all others.
+     ((not (eq exact-a exact-b)) exact-a)
+     ;; Longer shared path prefix means closer to CWD.
+     ((not (= common-a common-b)) (> common-a common-b))
+     ;; Among equally close directories, ancestors of CWD come first.
+     ((not (eq ancestor-a ancestor-b)) ancestor-a)
+     ;; Otherwise: most recently used first, then by session id.
+     ((not (= used-a used-b)) (> used-a used-b))
+     (t (string< (claude-code-ide-mcp-session-session-id session-a)
+                 (claude-code-ide-mcp-session-session-id session-b))))))
+
 (defun claude-code-ide--get-buffer-name (&optional directory)
   "Get the base buffer name for a Claude Code session in DIRECTORY.
 If DIRECTORY is not provided, use the current working directory."
@@ -1736,17 +1778,21 @@ navigation overrides `claude-code-ide-focus-on-open'."
 ;;;###autoload
 (defun claude-code-ide-list-sessions ()
   "List active Claude Code sessions in the current perspective and switch.
-Sessions pinned to other perspectives are kept out of the list."
+Sessions pinned to other perspectives are kept out of the list.
+Sessions are ordered by proximity to the working directory: the
+current project's sessions first, then by longest shared path
+prefix, with directories containing the working directory before
+other equally close ones; ties order by most recent use."
   (interactive)
   (claude-code-ide--cleanup-dead-sessions)
-  (let* ((sessions (sort (cl-remove-if-not
+  (let* ((cwd (claude-code-ide--get-working-directory))
+         (sessions (sort (cl-remove-if-not
                           (lambda (session)
                             (equal (claude-code-ide-mcp-session-persp-name session)
                                    (persp-current-name)))
                           (claude-code-ide-mcp--active-sessions))
                          (lambda (a b)
-                           (> (or (claude-code-ide-mcp-session-last-used a) 0)
-                              (or (claude-code-ide-mcp-session-last-used b) 0)))))
+                           (claude-code-ide--session-closer-p a b cwd))))
          (candidates
           (mapcar (lambda (session)
                     (cons (format "%s — %s (%s)"
