@@ -273,7 +273,10 @@ index holds no symbols."
             (if (not target-buffer)
                 (format "Error listing symbols in %s: no such file" file-path)
               (with-current-buffer target-buffer
-                (let ((entries (claude-code-ide-mcp-imenu--entries
+                ;; Bound LSP-backed index functions (e.g. eglot-imenu) so a
+                ;; wedged language server errors out instead of freezing Emacs.
+                (let ((jsonrpc-request-timeout 3)
+                      (entries (claude-code-ide-mcp-imenu--entries
                                 (claude-code-ide-mcp-imenu--create-index))))
                   (if entries
                       (mapcar (lambda (entry)
