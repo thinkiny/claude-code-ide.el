@@ -983,7 +983,8 @@ concurrent sessions.  Returns the session object."
 Deregistration and hook removal run unconditionally: a failure freeing
 one resource (say, an unwritable lockfile directory) must not leave a
 phantom session wedged in the registry with the global hooks alive."
-  (let ((project-dir (claude-code-ide-mcp-session-project-dir session)))
+  (let ((project-dir (claude-code-ide-mcp-session-project-dir session))
+        (client (claude-code-ide-mcp-session-client session)))
     (claude-code-ide-debug "Stopping MCP session %s for %s"
                            (claude-code-ide-mcp-session-session-id session)
                            project-dir)
@@ -994,7 +995,10 @@ phantom session wedged in the registry with the global hooks alive."
           ;; frame finds no owner and gets ignored
           (setf (claude-code-ide-mcp-session-client session) nil)
 
-          ;; Close server and client (best effort)
+          ;; Close client explicitly: server teardown normally reaches it,
+          ;; but the session is the authoritative owner.
+          (when client
+            (ignore-errors (websocket-close client)))
           (when-let* ((server (claude-code-ide-mcp-session-server session)))
             (ignore-errors (websocket-server-close server)))
 

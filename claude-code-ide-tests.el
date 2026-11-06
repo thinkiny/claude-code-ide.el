@@ -3726,6 +3726,32 @@ sibling instance."
       (claude-code-ide-tests--stop-all-sessions)
       (claude-code-ide-tests--clear-processes))))
 
+(ert-deftest claude-code-ide-test-kill-buffer-closes-websocket-client ()
+  "Killing a terminal buffer explicitly closes its WebSocket client."
+  (claude-code-ide-tests--clear-processes)
+  (let* ((project-dir "/tmp/claude-client-close/")
+         (buffer (generate-new-buffer "*claude-client-close*"))
+         (client (claude-code-ide-tests--make-websocket "ws://127.0.0.1:10017"))
+         (closed '())
+         (session (claude-code-ide-tests--make-session
+                   project-dir :buffer buffer :client client)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (add-hook 'kill-buffer-hook
+                      (lambda ()
+                        (claude-code-ide--cleanup-session session 'buffer-dying))
+                      nil t))
+          (cl-letf (((symbol-function 'websocket-close)
+                     (lambda (websocket) (push websocket closed))))
+            (kill-buffer buffer))
+          (should (equal closed (list client)))
+          (should-not (claude-code-ide-mcp-session-client session)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (claude-code-ide-tests--stop-all-sessions)
+      (claude-code-ide-tests--clear-processes))))
+
 (ert-deftest claude-code-ide-test-kill-buffer-no-nested-kill ()
   "Killing a terminal buffer leaves it alive for later kill hooks.
 The session's `kill-buffer-hook' entry runs cleanup with the

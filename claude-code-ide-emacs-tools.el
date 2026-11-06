@@ -181,6 +181,46 @@ Returns project directory, active buffer, and file count."
                   (length (project-files (project-current nil project-dir)))))
       "No session context available")))
 
+(defun claude-code-ide-mcp--imenu-flatten (index &optional prefix)
+  "Flatten imenu INDEX into a list of (DISPLAY-NAME . POSITION).
+Nested categories become \"[Category] name\" prefixes; *Rescan*-style
+special entries are skipped."
+  (mapcan
+   (lambda (item)
+     (when (and (consp item)
+                (stringp (car item))
+                (not (string-prefix-p "*" (car item))))
+       (let ((pos (cdr item)))
+         (cond
+          ((or (markerp pos) (numberp pos))
+           (list (cons (if prefix
+                           (format "[%s] %s" prefix (car item))
+                         (car item))
+                       pos)))
+          ((listp pos)
+           (claude-code-ide-mcp--imenu-flatten pos (car item)))))))
+   index))
+
+(defun claude-code-ide-mcp--imenu-format (entries file-path)
+  "Render flattened imenu ENTRIES as \"FILE:LINE: name\" strings.
+Entries are sorted by position so line numbers are computed in a single
+ascending pass through the buffer."
+  (let ((sorted (sort entries
+                      :key (lambda (e)
+                             (if (markerp (cdr e)) (marker-position (cdr e)) (cdr e)))))
+        (line (line-number-at-pos (point-min)))
+        (prev (point-min))
+        results)
+    (save-excursion
+      (goto-char (point-min))
+      (dolist (entry sorted)
+        (let ((pos (if (markerp (cdr entry)) (marker-position (cdr entry)) (cdr entry))))
+          (when (> pos prev)
+            (cl-incf line (count-lines prev pos))
+            (setq prev pos))
+          (push (format "%s:%d: %s" file-path line (car entry)) results))))
+    (nreverse results)))
+
 (defun claude-code-ide-mcp-imenu-list-symbols (file-path)
   "List all symbols in FILE-PATH using imenu.
 Returns a list of symbols with their types and positions."
@@ -190,59 +230,18 @@ Returns a list of symbols with their types and positions."
         (setq file-path (concat (file-remote-p default-directory) file-path)))
     (claude-code-ide-mcp-server-with-session-context nil
       (condition-case err
-          (let* ((existing-buffer (find-buffer-visiting file-path))
-                 (target-buffer (or existing-buffer
-                                    (find-file-noselect file-path))))
-            (with-current-buffer target-buffer
-              ;; Ensure font-lock/treesit is initialized for newly opened buffers
-              (unless existing-buffer
-                (font-lock-ensure)
-                (setq imenu--index-alist nil))
-              ;; Generate or update imenu index
-              (imenu--make-index-alist)
+          (with-current-buffer (or (find-buffer-visiting file-path)
+                                   (find-file-noselect file-path))
+            ;; Bound LSP-backed index functions (e.g. eglot-imenu) so a slow
+            ;; or wedged language server errors out instead of freezing Emacs.
+            ;; Non-LSP index functions are unaffected by this binding.
+            (let ((jsonrpc-request-timeout 3))
+              (unless imenu--index-alist
+                (imenu--make-index-alist))
               (if imenu--index-alist
-                  (let ((results '()))
-                    ;; Process the imenu index
-                    (dolist (item imenu--index-alist)
-                      (cond
-                       ;; Skip special entries
-                       ((string-match-p "^\\*" (car item)) nil)
-                       ;; Handle simple entries (name . position)
-                       ((markerp (cdr item))
-                        (let ((line (line-number-at-pos (marker-position (cdr item)))))
-                          (push (format "%s:%d: %s"
-                                        file-path
-                                        line
-                                        (car item))
-                                results)))
-                       ;; Handle position numbers
-                       ((numberp (cdr item))
-                        (let ((line (line-number-at-pos (cdr item))))
-                          (push (format "%s:%d: %s"
-                                        file-path
-                                        line
-                                        (car item))
-                                results)))
-                       ;; Handle nested entries (category . items)
-                       ((listp (cdr item))
-                        (let ((category (car item)))
-                          (dolist (subitem (cdr item))
-                            (when (and (consp subitem)
-                                       (or (markerp (cdr subitem))
-                                           (numberp (cdr subitem))))
-                              (let ((line (line-number-at-pos
-                                           (if (markerp (cdr subitem))
-                                               (marker-position (cdr subitem))
-                                             (cdr subitem)))))
-                                (push (format "%s:%d: [%s] %s"
-                                              file-path
-                                              line
-                                              category
-                                              (car subitem))
-                                      results))))))))
-                    (if results
-                        (nreverse results)
-                      (format "No symbols found in %s" file-path)))
+                  (claude-code-ide-mcp--imenu-format
+                   (claude-code-ide-mcp--imenu-flatten imenu--index-alist)
+                   file-path)
                 (format "No imenu support or no symbols found in %s" file-path))))
         (error
          (format "Error listing symbols in %s: %s"
